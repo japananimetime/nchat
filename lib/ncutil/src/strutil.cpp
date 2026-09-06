@@ -757,3 +757,108 @@ int StrUtil::WStringWidth(const std::wstring& p_WStr)
   int width = wcswidth(p_WStr.c_str(), p_WStr.size());
   return (width != -1) ? width : p_WStr.size();
 }
+
+// Case-insensitive substring match which also matches across cyrillic/latin transliteration
+// ("spk" matches "СПК", "спк" matches "SPK") and across a mistyped keyboard layout
+// ("cgr" typed on a qwerty layout matches "спк"), similar to Telegram Desktop search.
+bool StrUtil::MatchesFilter(const std::string& p_Text, const std::string& p_Filter)
+{
+  if (p_Filter.empty()) return true;
+
+  const std::string text = ToFold(p_Text);
+  const std::string filter = ToFold(p_Filter);
+  if (text.find(filter) != std::string::npos) return true;
+
+  const std::wstring wtext = ToWString(text);
+  const std::wstring wfilter = ToWString(filter);
+
+  const std::wstring textLatin = Transliterate(wtext);
+  const std::wstring filterLatin = Transliterate(wfilter);
+  if (((textLatin != wtext) || (filterLatin != wfilter)) && (textLatin.find(filterLatin) != std::wstring::npos))
+  {
+    return true;
+  }
+
+  const std::wstring filterSwapped = SwapKeyboardLayout(wfilter);
+  if ((filterSwapped != wfilter) && (wtext.find(filterSwapped) != std::wstring::npos)) return true;
+
+  return false;
+}
+
+// Cyrillic to latin transliteration of a lowercase string, with common latin spelling
+// variants reduced to one form so that both sides can be compared.
+std::wstring StrUtil::Transliterate(const std::wstring& p_WStr)
+{
+  static const std::map<wchar_t, std::wstring> translit =
+  {
+    { L'а', L"a" }, { L'б', L"b" }, { L'в', L"v" }, { L'г', L"g" }, { L'д', L"d" }, { L'е', L"e" },
+    { L'ё', L"e" }, { L'ж', L"zh" }, { L'з', L"z" }, { L'и', L"i" }, { L'й', L"y" }, { L'к', L"k" },
+    { L'л', L"l" }, { L'м', L"m" }, { L'н', L"n" }, { L'о', L"o" }, { L'п', L"p" }, { L'р', L"r" },
+    { L'с', L"s" }, { L'т', L"t" }, { L'у', L"u" }, { L'ф', L"f" }, { L'х', L"h" }, { L'ц', L"c" },
+    { L'ч', L"ch" }, { L'ш', L"sh" }, { L'щ', L"sch" }, { L'ъ', L"" }, { L'ы', L"y" }, { L'ь', L"" },
+    { L'э', L"e" }, { L'ю', L"yu" }, { L'я', L"ya" },
+    { L'і', L"i" }, { L'ї', L"yi" }, { L'є', L"ye" }, { L'ґ', L"g" }, { L'ў', L"u" },
+  };
+
+  std::wstring rv;
+  rv.reserve(p_WStr.size());
+  for (const wchar_t wch : p_WStr)
+  {
+    auto it = translit.find(wch);
+    if (it != translit.end())
+    {
+      rv += it->second;
+    }
+    else
+    {
+      rv += wch;
+    }
+  }
+
+  // reduce latin spelling variants
+  static const std::vector<std::pair<std::wstring, std::wstring>> reductions =
+  {
+    { L"kh", L"h" }, { L"ts", L"c" }, { L"tz", L"c" }, { L"iy", L"y" }, { L"ij", L"y" }, { L"yo", L"e" },
+    { L"ju", L"yu" }, { L"ja", L"ya" }, { L"je", L"e" }, { L"'", L"" },
+  };
+  for (const auto& reduction : reductions)
+  {
+    size_t pos = 0;
+    while ((pos = rv.find(reduction.first, pos)) != std::wstring::npos)
+    {
+      rv.replace(pos, reduction.first.size(), reduction.second);
+      pos += reduction.second.size();
+    }
+  }
+
+  return rv;
+}
+
+// Swap characters between qwerty and standard russian (йцукен) keyboard layouts, both directions
+std::wstring StrUtil::SwapKeyboardLayout(const std::wstring& p_WStr)
+{
+  static const std::map<wchar_t, wchar_t> layoutSwap = []()
+  {
+    const std::wstring qwerty = L"qwertyuiop[]asdfghjkl;'zxcvbnm,.`";
+    const std::wstring jcuken = L"йцукенгшщзхъфывапролджэячсмитьбюё";
+    std::map<wchar_t, wchar_t> swap;
+    for (size_t i = 0; i < qwerty.size() && i < jcuken.size(); ++i)
+    {
+      swap[qwerty[i]] = jcuken[i];
+      swap[jcuken[i]] = qwerty[i];
+    }
+    return swap;
+  }();
+
+  std::wstring rv = p_WStr;
+  for (wchar_t& wch : rv)
+  {
+    auto it = layoutSwap.find(wch);
+    if (it != layoutSwap.end())
+    {
+      wch = it->second;
+    }
+  }
+
+  return rv;
+}

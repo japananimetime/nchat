@@ -97,7 +97,7 @@ void UiGroupMemberListDialog::UpdateList()
     std::string displayName = name;
 
     if (m_FilterStr.empty() ||
-        (StrUtil::ToFold(displayName).find(StrUtil::ToFold(StrUtil::ToString(m_FilterStr))) != std::string::npos))
+        StrUtil::MatchesFilter(displayName, StrUtil::ToString(m_FilterStr)))
     {
       if (!emojiEnabled)
       {

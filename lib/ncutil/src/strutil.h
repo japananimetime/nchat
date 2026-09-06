@@ -44,6 +44,9 @@ public:
   static std::string StrToHex(const std::string& p_String);
   static std::string Textize(const std::string& p_Str);
   static std::string ToFold(const std::string& p_Str);
+  static bool MatchesFilter(const std::string& p_Text, const std::string& p_Filter);
+  static std::wstring Transliterate(const std::wstring& p_WStr);
+  static std::wstring SwapKeyboardLayout(const std::wstring& p_WStr);
   static long ToInteger(const std::string& p_Str);
   static std::string ToLower(const std::string& p_Str);
   static std::wstring ToLower(const std::wstring& p_WStr);

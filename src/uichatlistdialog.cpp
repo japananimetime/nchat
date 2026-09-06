@@ -70,7 +70,7 @@ void UiChatListDialog::UpdateList()
     if (name.empty()) continue;
 
     if (m_FilterStr.empty() ||
-        (StrUtil::ToFold(name).find(StrUtil::ToFold(StrUtil::ToString(m_FilterStr))) != std::string::npos))
+        StrUtil::MatchesFilter(name, StrUtil::ToString(m_FilterStr)))
     {
       std::string displayName = name + m_Model->GetProfileSuffix(profileId);
 

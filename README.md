@@ -750,6 +750,9 @@ Specifies width of chat list.
 ### listdialog_show_filter
 
 Specifies whether list dialogs should display the search filter input by user.
+The filter is case-insensitive and also matches across cyrillic/latin
+transliteration (e.g. `spk` matches `СПК`) and across a mistyped keyboard
+layout (e.g. `cgr` matches `спк`).
 
 ### mark_read_any_chat
 
