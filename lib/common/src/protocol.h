@@ -52,6 +52,11 @@ public:
   virtual bool HasFeature(ProtocolFeature p_ProtocolFeature) const = 0;
   virtual bool IsGroupChat(const std::string& p_ChatId) const = 0;
   virtual std::string GetSelfId() const = 0;
+  // optional: id of parent chat for sub-chats (e.g. Telegram forum topics), empty if top-level
+  virtual std::string GetParentChatId(const std::string& /*p_ChatId*/) const
+  {
+    return "";
+  }
 
   virtual bool SetupProfile(const std::string& p_ProfilesDir, std::string& p_ProfileId) = 0;
   virtual bool LoadProfile(const std::string& p_ProfilesDir, const std::string& p_ProfileId) = 0;

@@ -21,6 +21,7 @@ Features
 - Show user status (online, away, typing)
 - Jump to next unread chat
 - Archive, pin and delete chats
+- Telegram forum topics, listed as sub-chats of their group
 - Search messages within a chat
 - List dialogs for chats, contacts, emojis, files
 - Message history cache with text export
@@ -69,6 +70,7 @@ Interactive Commands:
     Alt-a       archive current chat
     Alt-d       delete/leave current chat
     Alt-e       external editor compose
+    Alt-h       collapse/expand topics of current group
     Alt-i       auto-compose reply
     Alt-n       search contacts
     Alt-p       pin/unpin current chat
@@ -964,6 +966,7 @@ This configuration file holds user interface key bindings. Default content:
     toggle_emoji=KEY_CTRLY
     toggle_help=KEY_CTRLG
     toggle_list=KEY_CTRLL
+    toggle_subchats=\33\150
     toggle_top=KEY_NONE
     transfer=KEY_CTRLT
     unread_chat=KEY_CTRLF

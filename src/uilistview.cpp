@@ -61,8 +61,7 @@ void UiListView::Draw()
   std::vector<bool> unreads;
   for (auto& chatPair : p_ChatVec)
   {
-    const std::string& name = m_Model->GetContactListNameLocked(chatPair.first, chatPair.second, true /*p_AllowId*/,
-                                                                true /*p_AllowAlias*/);
+    const std::string& name = m_Model->GetChatListNameLocked(chatPair.first, chatPair.second);
     bool isUnread = m_Model->GetChatIsUnreadLocked(chatPair.first, chatPair.second);
     names.push_back(name);
     unreads.push_back(isUnread);

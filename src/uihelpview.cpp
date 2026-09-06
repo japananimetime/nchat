@@ -107,6 +107,7 @@ void UiHelpView::Draw()
     AppendHelpItem("toggle_emoji", "TgEmoji", helpItems);
     AppendHelpItem("toggle_list", "TgList", helpItems);
     AppendHelpItem("toggle_top", "TgTop", helpItems);
+    AppendHelpItem("toggle_subchats", "TgTopics", helpItems);
     AppendHelpItem("toggle_help", "TgHelp", helpItems);
 
     return helpItems;

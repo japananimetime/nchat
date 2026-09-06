@@ -18,7 +18,7 @@
 UiChatListDialog::UiChatListDialog(const UiDialogParams& p_Params)
   : UiListDialog(p_Params, false /*p_ShadeHidden*/)
 {
-  m_ChatVec = m_Model->GetChatVec();
+  m_ChatVec = m_Model->GetAllChatVec();
   UpdateList();
 }
 

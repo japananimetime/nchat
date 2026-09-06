@@ -46,6 +46,8 @@
 // ---------------------------------------------------------------------
 
 const std::pair<std::string, std::string> UiModel::Impl::s_ChatNone;
+const std::string UiModel::Impl::s_SubChatSeparator = " \xe2\x80\xba "; // " › "
+const std::string UiModel::Impl::s_SubChatIndent = "\xe2\x80\xba "; // "› "
 
 UiModel::Impl::Impl(UiModel* p_UiModel)
 {
@@ -151,6 +153,32 @@ void UiModel::Impl::OnKeyToggleTop()
   AnyUserKeyInput();
   m_View->SetTopEnabled(!m_View->GetTopEnabled());
   ReinitView();
+}
+
+void UiModel::Impl::OnKeyToggleSubChats()
+{
+  AnyUserKeyInput();
+  if (m_CurrentChat == s_ChatNone) return;
+
+  const std::string parentId = GetParentChatId(m_CurrentChat.first, m_CurrentChat.second);
+  const std::pair<std::string, std::string> parentChat =
+    parentId.empty() ? m_CurrentChat : std::make_pair(m_CurrentChat.first, parentId);
+
+  if (m_CollapsedChats.erase(parentChat) == 0)
+  {
+    m_CollapsedChats.insert(parentChat);
+    if (!parentId.empty())
+    {
+      // collapsing from within a sub-chat, move to its parent
+      m_CurrentChat = parentChat;
+      SortChats();
+      OnCurrentChatChanged();
+      return;
+    }
+  }
+
+  SortChats();
+  UpdateList();
 }
 
 void UiModel::Impl::OnKeyToggleEmoji()
@@ -2388,7 +2416,18 @@ void UiModel::Impl::ProcessTimers()
 void UiModel::Impl::SortChats()
 {
   static const bool mutedPositionByTimestamp = UiConfig::GetBool("muted_position_by_timestamp");
-  std::sort(m_ChatVec.begin(), m_ChatVec.end(),
+
+  // all listed chats
+  std::vector<std::pair<std::string, std::string>> allChats;
+  for (const auto& profileChats : m_ChatSet)
+  {
+    for (const auto& chatId : profileChats.second)
+    {
+      allChats.push_back(std::make_pair(profileChats.first, chatId));
+    }
+  }
+
+  std::sort(allChats.begin(), allChats.end(),
             [&](const std::pair<std::string, std::string>& lhs, const std::pair<std::string, std::string>& rhs) -> bool
   {
     const ChatInfo& lhsChatInfo = m_ChatInfos[lhs.first][lhs.second];
@@ -2415,6 +2454,51 @@ void UiModel::Impl::SortChats()
 
     return false;
   });
+
+  // group sub-chats (e.g. forum topics) under their parent chat, if the parent is listed
+  std::vector<std::pair<std::string, std::string>> topChats;
+  std::map<std::pair<std::string, std::string>, std::vector<std::pair<std::string, std::string>>> subChats;
+  for (const auto& chat : allChats)
+  {
+    const std::string parentId = GetParentChatId(chat.first, chat.second);
+    if (!parentId.empty() && m_ChatSet[chat.first].count(parentId))
+    {
+      subChats[std::make_pair(chat.first, parentId)].push_back(chat);
+    }
+    else
+    {
+      topChats.push_back(chat);
+    }
+  }
+
+  // sub-chats are only listed while their parent, or a sibling, is the current chat
+  std::pair<std::string, std::string> expandedParent = s_ChatNone;
+  if (m_CurrentChat != s_ChatNone)
+  {
+    const std::string currentParentId = GetParentChatId(m_CurrentChat.first, m_CurrentChat.second);
+    expandedParent = currentParentId.empty() ? m_CurrentChat : std::make_pair(m_CurrentChat.first, currentParentId);
+  }
+
+  m_AllChatVec.clear();
+  m_ChatVec.clear();
+  for (const auto& chat : topChats)
+  {
+    m_AllChatVec.push_back(chat);
+    m_ChatVec.push_back(chat);
+
+    auto subChatsIt = subChats.find(chat);
+    if (subChatsIt == subChats.end()) continue;
+
+    const bool isExpanded = (chat == expandedParent) && (m_CollapsedChats.count(chat) == 0);
+    for (const auto& subChat : subChatsIt->second)
+    {
+      m_AllChatVec.push_back(subChat);
+      if (isExpanded)
+      {
+        m_ChatVec.push_back(subChat);
+      }
+    }
+  }
 
   if (!m_ChatVec.empty())
   {
@@ -2586,7 +2670,37 @@ std::string UiModel::Impl::GetContactName(const std::string& p_ProfileId, const 
     return p_ChatId;
   }
 
+  const std::string parentId = GetParentChatId(p_ProfileId, p_ChatId);
+  if (!parentId.empty())
+  {
+    return GetContactName(p_ProfileId, parentId) + s_SubChatSeparator + chatName;
+  }
+
   return chatName;
+}
+
+std::string UiModel::Impl::GetParentChatId(const std::string& p_ProfileId, const std::string& p_ChatId)
+{
+  auto it = m_Protocols.find(p_ProfileId);
+  if (it != m_Protocols.end())
+  {
+    return it->second->GetParentChatId(p_ChatId);
+  }
+
+  return "";
+}
+
+// name as shown in chat list: sub-chats are indented without parent name
+std::string UiModel::Impl::GetChatListName(const std::string& p_ProfileId, const std::string& p_ChatId)
+{
+  const std::string parentId = GetParentChatId(p_ProfileId, p_ChatId);
+  if (parentId.empty())
+  {
+    return GetContactListName(p_ProfileId, p_ChatId, true /*p_AllowId*/, true /*p_AllowAlias*/);
+  }
+
+  const ContactInfo& contactInfo = m_ContactInfos[p_ProfileId][p_ChatId];
+  return s_SubChatIndent + (contactInfo.name.empty() ? p_ChatId : contactInfo.name);
 }
 
 std::string UiModel::Impl::GetContactNameIncludingSelf(const std::string& p_ProfileId, const std::string& p_ChatId)
@@ -2624,6 +2738,12 @@ std::string UiModel::Impl::GetContactListName(const std::string& p_ProfileId, co
   else if (p_AllowId && chatName.empty())
   {
     return p_ChatId;
+  }
+
+  const std::string parentId = GetParentChatId(p_ProfileId, p_ChatId);
+  if (!parentId.empty())
+  {
+    return GetContactListName(p_ProfileId, parentId, p_AllowId, p_AllowAlias) + s_SubChatSeparator + chatName;
   }
 
   return chatName;
@@ -3025,6 +3145,23 @@ int& UiModel::Impl::GetEntryPos()
 std::vector<std::pair<std::string, std::string>>& UiModel::Impl::GetChatVec()
 {
   return m_ChatVec;
+}
+
+std::vector<std::pair<std::string, std::string>>& UiModel::Impl::GetAllChatVec()
+{
+  return m_AllChatVec;
+}
+
+// make a listed chat (possibly a collapsed sub-chat) current, returns false if not listed
+bool UiModel::Impl::SelectListedChat(const std::pair<std::string, std::string>& p_Chat)
+{
+  auto profileChatsIt = m_ChatSet.find(p_Chat.first);
+  if ((profileChatsIt == m_ChatSet.end()) || (profileChatsIt->second.count(p_Chat.second) == 0)) return false;
+
+  m_CurrentChat = p_Chat;
+  m_CurrentChatIndex = std::max(m_CurrentChatIndex, 0);
+  SortChats(); // expands parent of sub-chat and updates m_CurrentChatIndex
+  return true;
 }
 
 std::vector<std::pair<std::string, std::string>>& UiModel::Impl::GetChatVecLock()
@@ -4214,17 +4351,7 @@ void UiModel::Impl::PerformForwardMessage(const std::pair<std::string, std::stri
   }
 
   // switch current chat to recipient
-  bool found = false;
-  for (size_t i = 0; i < m_ChatVec.size(); ++i)
-  {
-    if (m_ChatVec.at(i) == p_Chat)
-    {
-      m_CurrentChatIndex = i;
-      m_CurrentChat = m_ChatVec.at(m_CurrentChatIndex);
-      found = true;
-      break;
-    }
-  }
+  bool found = SelectListedChat(p_Chat);
 
   if (found)
   {
@@ -4274,17 +4401,7 @@ bool UiModel::Impl::IsChatForceMuted(const std::string& p_ChatId)
 void UiModel::Impl::GotoChat(const std::pair<std::string, std::string>& p_Chat)
 {
   // switch current chat
-  bool found = false;
-  for (size_t i = 0; i < m_ChatVec.size(); ++i)
-  {
-    if (m_ChatVec.at(i) == p_Chat)
-    {
-      m_CurrentChatIndex = i;
-      m_CurrentChat = m_ChatVec.at(m_CurrentChatIndex);
-      found = true;
-      break;
-    }
-  }
+  bool found = SelectListedChat(p_Chat);
 
   if (found)
   {
@@ -4529,6 +4646,7 @@ void UiModel::KeyHandler(wint_t p_Key)
 
   static wint_t keyToggleList = UiKeyConfig::GetKey("toggle_list");
   static wint_t keyToggleTop = UiKeyConfig::GetKey("toggle_top");
+  static wint_t keyToggleSubChats = UiKeyConfig::GetKey("toggle_subchats");
   static wint_t keyToggleHelp = UiKeyConfig::GetKey("toggle_help");
   static wint_t keyToggleEmoji = UiKeyConfig::GetKey("toggle_emoji");
 
@@ -4575,6 +4693,11 @@ void UiModel::KeyHandler(wint_t p_Key)
   {
     std::unique_lock<owned_mutex> lock(m_ModelMutex);
     GetImpl().OnKeyToggleTop();
+  }
+  else if (p_Key == keyToggleSubChats)
+  {
+    std::unique_lock<owned_mutex> lock(m_ModelMutex);
+    GetImpl().OnKeyToggleSubChats();
   }
   else if (p_Key == keyToggleEmoji)
   {
@@ -4836,6 +4959,12 @@ std::vector<std::pair<std::string, std::string>> UiModel::GetChatVec()
   return GetImpl().GetChatVec();
 }
 
+std::vector<std::pair<std::string, std::string>> UiModel::GetAllChatVec()
+{
+  std::unique_lock<owned_mutex> lock(m_ModelMutex);
+  return GetImpl().GetAllChatVec();
+}
+
 std::string UiModel::GetContactListName(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_AllowId,
                                         bool p_AllowAlias)
 {
@@ -4962,6 +5091,12 @@ std::string UiModel::GetContactListNameLocked(const std::string& p_ProfileId, co
 {
   nc_assert(m_ModelMutex.owns_lock());
   return GetImpl().GetContactListName(p_ProfileId, p_ChatId, p_AllowId, p_AllowAlias);
+}
+
+std::string UiModel::GetChatListNameLocked(const std::string& p_ProfileId, const std::string& p_ChatId)
+{
+  nc_assert(m_ModelMutex.owns_lock());
+  return GetImpl().GetChatListName(p_ProfileId, p_ChatId);
 }
 
 std::string UiModel::GetContactNameLocked(const std::string& p_ProfileId, const std::string& p_ChatId)

@@ -32,6 +32,7 @@ public:
   std::string GetProfileDisplayName() const;
   bool HasFeature(ProtocolFeature p_ProtocolFeature) const;
   bool IsGroupChat(const std::string& p_ChatId) const;
+  std::string GetParentChatId(const std::string& p_ChatId) const;
   std::string GetSelfId() const;
 
   bool SetupProfile(const std::string& p_ProfilesDir, std::string& p_ProfileId);

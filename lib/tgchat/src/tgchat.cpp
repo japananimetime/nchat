@@ -156,6 +156,12 @@ private:
   AuthInputType m_AuthInputType = AuthInputNone;
   std::uint64_t m_AuthInputQueryId = 0;
 
+public:
+  // Forum topics: a topic is exposed to the UI as a virtual chat with id "<chatId>_<topicId>"
+  static std::string MakeChatId(int64_t p_ChatId, int32_t p_TopicId);
+  static void ParseChatId(const std::string& p_ChatIdStr, int64_t& p_ChatId, int32_t& p_TopicId);
+  static int64_t BaseChatId(const std::string& p_ChatIdStr);
+
 private:
   void CallMessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage);
   void PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessage);
@@ -204,7 +210,8 @@ private:
   bool IsGroup(int64_t p_UserId);
   bool IsSelf(int64_t p_UserId);
   std::string GetContactName(int64_t p_UserId);
-  void GetChatHistory(int64_t p_ChatId, int64_t p_FromMsgId, int32_t p_Offset, int32_t p_Limit, bool p_Sequence);
+  void GetChatHistory(int64_t p_ChatId, int32_t p_TopicId, int64_t p_FromMsgId, int32_t p_Offset, int32_t p_Limit,
+                      bool p_Sequence);
   td::td_api::object_ptr<td::td_api::formattedText> GetFormattedText(const std::string& p_Text);
   td::td_api::object_ptr<td::td_api::inputMessageText> GetMessageText(const std::string& p_Text);
   std::string ConvertMarkdownV2ToV1(const std::string& p_Str);
@@ -215,8 +222,20 @@ private:
   void GetReactionsEmojis(td::td_api::object_ptr<td::td_api::availableReactions>& p_AvailableReactions,
                           std::set<std::string>& p_Emojis);
   int64_t GetDummyUserId(const std::string& p_Name);
-  void UpdateLastReadOutboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId);
-  void UpdateLastReadInboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId);
+  void UpdateLastReadOutboxMessage(int64_t p_ChatId, int32_t p_TopicId, int64_t p_LastReadMsgId);
+  void UpdateLastReadInboxMessage(int64_t p_ChatId, int32_t p_TopicId, int64_t p_LastReadMsgId);
+  static int32_t GetMessageTopicId(const td::td_api::message& p_TdMessage);
+  std::vector<std::string> GetMessageChatIds(const td::td_api::message& p_TdMessage);
+  std::vector<std::string> ResolveMessageChatIds(int64_t p_ChatId, int64_t p_MsgId);
+  std::vector<std::string> GetNotifyChatIds(int64_t p_ChatId);
+  void NotifyMessages(const std::string& p_ChatId, std::vector<ChatMessage>& p_ChatMessages,
+                      const std::string& p_FromMsgId, bool p_Sequence);
+  void NotifyMessagesByChat(std::vector<td::td_api::object_ptr<td::td_api::message>>& p_TdMessages,
+                            bool p_Sequence);
+  void GetForumTopics(int64_t p_ChatId, int32_t p_OffsetDate, int64_t p_OffsetMsgId, int32_t p_OffsetTopicId);
+  bool AddForumTopic(int64_t p_ChatId, const td::td_api::forumTopicInfo& p_Info, ChatInfo& p_ChatInfo,
+                     ContactInfo& p_ContactInfo);
+  void NotifyTopicContact(const ContactInfo& p_ContactInfo);
 
 private:
   std::thread m_ServiceThread;
@@ -235,10 +254,30 @@ private:
   std::uint64_t m_AuthQueryId = 0;
   std::uint64_t m_CurrentQueryId = 0;
   std::mutex m_CurrentQueryIdMutex;
-  std::map<int64_t, int64_t> m_LastReadInboxMessage;
-  std::map<int64_t, int64_t> m_LastReadOutboxMessage;
-  std::map<int64_t, std::set<int64_t>> m_UnreadInboxMessages;
-  std::map<int64_t, std::set<int64_t>> m_UnreadOutboxMessages;
+  using ReadKey = std::pair<int64_t, int32_t>; // chatId, topicId (0 = whole chat)
+  std::map<ReadKey, int64_t> m_LastReadInboxMessage;
+  std::map<ReadKey, int64_t> m_LastReadOutboxMessage;
+  std::map<ReadKey, std::set<int64_t>> m_UnreadInboxMessages;
+  std::map<ReadKey, std::set<int64_t>> m_UnreadOutboxMessages;
+
+  // Forum topics
+  struct TopicInfo
+  {
+    std::string name;
+    bool isClosed = false;
+    bool isMuted = false;
+    bool useDefaultMute = true;
+  };
+  struct ForumInfo
+  {
+    std::string title;
+    ChatInfo baseChatInfo; // chat-level pin/mute/archive state shared by all topics
+    std::map<int32_t, TopicInfo> topics;
+  };
+  std::map<int64_t, ForumInfo> m_Forums; // only chats which are forums
+  std::map<std::string, ContactInfo> m_TopicContactInfos; // virtual chat id -> name
+  std::map<int64_t, std::map<int64_t, int32_t>> m_MessageTopics; // chatId -> msgId -> topicId
+  static const char s_TopicSeparator = '_';
   std::map<int64_t, ContactInfo> m_ContactInfos;
   std::map<int64_t, ChatType> m_ChatTypes;
   int64_t m_CurrentChat = 0;
@@ -284,8 +323,16 @@ bool TgChat::HasFeature(ProtocolFeature p_ProtocolFeature) const
 
 bool TgChat::IsGroupChat(const std::string& p_ChatId) const
 {
-  int64_t chatId = StrUtil::NumFromHex<int64_t>(p_ChatId);
+  int64_t chatId = Impl::BaseChatId(p_ChatId);
   return (chatId < 0);
+}
+
+std::string TgChat::GetParentChatId(const std::string& p_ChatId) const
+{
+  int64_t chatId = 0;
+  int32_t topicId = 0;
+  Impl::ParseChatId(p_ChatId, chatId, topicId);
+  return (topicId != 0) ? StrUtil::NumToHex(chatId) : "";
 }
 
 std::string TgChat::GetSelfId() const
@@ -603,12 +650,18 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           if (chats->chat_ids_.size() == 0) return;
 
           const bool noFilter = getChatsRequest->chatIds.empty();
+          std::unordered_set<std::string> requestedBaseIds;
+          for (const auto& requestedId : getChatsRequest->chatIds)
+          {
+            requestedBaseIds.insert(StrUtil::NumToHex(BaseChatId(requestedId)));
+          }
+
           std::vector<std::string> chatIds;
           std::vector<ChatInfo> chatInfos;
           for (auto chatId : chats->chat_ids_)
           {
             std::string chatIdStr = StrUtil::NumToHex(chatId);
-            if (noFilter || getChatsRequest->chatIds.count(chatIdStr))
+            if (noFilter || requestedBaseIds.count(chatIdStr))
             {
               chatIds.push_back(chatIdStr);
             }
@@ -684,6 +737,8 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
             if (!tchat) return;
 
+            int64_t supergroupId = 0;
+
             if (tchat->type_->get_id() == td::td_api::chatTypePrivate::ID)
             {
               m_ChatTypes[tchat->id_] = ChatPrivate;
@@ -699,6 +754,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
               else
               {
                 m_ChatTypes[tchat->id_] = ChatSuperGroup;
+                supergroupId = typeSupergroup->supergroup_id_;
               }
             }
             else if (tchat->type_->get_id() == td::td_api::chatTypeBasicGroup::ID)
@@ -750,17 +806,54 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
             chatInfo.isArchived = isArchived;
             chatInfo.lastMessageTime = lastMessageTime;
 
-            std::vector<ChatInfo> chatInfos;
-            chatInfos.push_back(chatInfo);
+            UpdateLastReadOutboxMessage(tchat->id_, 0, tchat->last_read_outbox_message_id_);
+            UpdateLastReadInboxMessage(tchat->id_, 0, tchat->last_read_inbox_message_id_);
 
-            std::shared_ptr<NewChatsNotify> newChatsNotify =
-              std::make_shared<NewChatsNotify>(m_ProfileId);
-            newChatsNotify->success = true;
-            newChatsNotify->chatInfos = chatInfos;
-            CallMessageHandler(newChatsNotify);
+            auto notifyChat = [this](const ChatInfo& p_ChatInfo)
+            {
+              std::shared_ptr<NewChatsNotify> newChatsNotify =
+                std::make_shared<NewChatsNotify>(m_ProfileId);
+              newChatsNotify->success = true;
+              newChatsNotify->chatInfos = std::vector<ChatInfo>({ p_ChatInfo });
+              CallMessageHandler(newChatsNotify);
+            };
 
-            UpdateLastReadOutboxMessage(tchat->id_, tchat->last_read_outbox_message_id_);
-            UpdateLastReadInboxMessage(tchat->id_, tchat->last_read_inbox_message_id_);
+            if (supergroupId == 0)
+            {
+              notifyChat(chatInfo);
+              return;
+            }
+
+            // supergroup: check whether it is a forum, in which case its topics are also listed
+            // as virtual sub-chats of the (flattened) group chat
+            const int64_t tchatId = tchat->id_;
+            const std::string tchatTitle = tchat->title_;
+            auto get_supergroup = td::td_api::make_object<td::td_api::getSupergroup>(supergroupId);
+            SendQuery(std::move(get_supergroup),
+                      [this, chatInfo, tchatId, tchatTitle, notifyChat](Object sgObject)
+            {
+              bool isForum = false;
+              if (sgObject->get_id() == td::td_api::supergroup::ID)
+              {
+                auto supergroup = td::move_tl_object_as<td::td_api::supergroup>(sgObject);
+                isForum = supergroup->is_forum_;
+              }
+
+              notifyChat(chatInfo);
+
+              if (!isForum)
+              {
+                m_Forums.erase(tchatId);
+                return;
+              }
+
+              LOG_DEBUG("forum chat %lld \"%s\"", tchatId, tchatTitle.c_str());
+              ForumInfo& forumInfo = m_Forums[tchatId];
+              forumInfo.title = tchatTitle;
+              forumInfo.baseChatInfo = chatInfo;
+
+              GetForumTopics(tchatId, 0, 0, 0);
+            });
           });
         }
       }
@@ -823,6 +916,11 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
                 contactInfos.push_back(contactInfo.second);
               }
 
+              for (const auto& topicContactInfo : m_TopicContactInfos)
+              {
+                contactInfos.push_back(topicContactInfo.second);
+              }
+
               Status::Clear(m_ProfileId, Status::FlagFetching);
             }
 
@@ -856,12 +954,14 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           }
         }
 
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(getMessageRequest->chatId);
+        int64_t chatId = 0;
+        int32_t topicId = 0;
+        ParseChatId(getMessageRequest->chatId, chatId, topicId);
         int64_t fromMsgId = StrUtil::NumFromHex<int64_t>(getMessageRequest->msgId);
         int32_t offset = -1; // to get fromMsgId itself
         int32_t limit = 1;
         bool sequence = false; // out-of-sequence single message
-        GetChatHistory(chatId, fromMsgId, offset, limit, sequence);
+        GetChatHistory(chatId, topicId, fromMsgId, offset, limit, sequence);
       }
       break;
 
@@ -882,12 +982,14 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           }
         }
 
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(getMessagesRequest->chatId);
+        int64_t chatId = 0;
+        int32_t topicId = 0;
+        ParseChatId(getMessagesRequest->chatId, chatId, topicId);
         int64_t fromMsgId = StrUtil::NumFromHex<int64_t>(getMessagesRequest->fromMsgId);
         int32_t offset = 0;
         int32_t limit = getMessagesRequest->limit;
         bool sequence = true; // in-sequence history request
-        GetChatHistory(chatId, fromMsgId, offset, limit, sequence);
+        GetChatHistory(chatId, topicId, fromMsgId, offset, limit, sequence);
       }
       break;
 
@@ -900,7 +1002,16 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
           p_RequestMessage);
 
         auto send_message = td::td_api::make_object<td::td_api::sendMessage>();
-        send_message->chat_id_ = StrUtil::NumFromHex<int64_t>(sendMessageRequest->chatId);
+        {
+          int64_t sendChatId = 0;
+          int32_t sendTopicId = 0;
+          ParseChatId(sendMessageRequest->chatId, sendChatId, sendTopicId);
+          send_message->chat_id_ = sendChatId;
+          if (sendTopicId != 0)
+          {
+            send_message->topic_id_ = td::td_api::make_object<td::td_api::messageTopicForum>(sendTopicId);
+          }
+        }
 
         if (!sendMessageRequest->chatMessage.quotedId.empty())
         {
@@ -1043,7 +1154,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         if (editMessageRequest->chatMessage.fileInfo.empty())
         {
           auto edit_message = td::td_api::make_object<td::td_api::editMessageText>();
-          edit_message->chat_id_ = StrUtil::NumFromHex<int64_t>(editMessageRequest->chatId);
+          edit_message->chat_id_ = BaseChatId(editMessageRequest->chatId);
           edit_message->message_id_ = StrUtil::NumFromHex<int64_t>(editMessageRequest->msgId);
 
           auto message_content = GetMessageText(editProcessedText);
@@ -1068,7 +1179,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         else
         {
           auto edit_message = td::td_api::make_object<td::td_api::editMessageCaption>();
-          edit_message->chat_id_ = StrUtil::NumFromHex<int64_t>(editMessageRequest->chatId);
+          edit_message->chat_id_ = BaseChatId(editMessageRequest->chatId);
           edit_message->message_id_ = StrUtil::NumFromHex<int64_t>(editMessageRequest->msgId);
 
           auto message_content = GetFormattedText(editProcessedText);
@@ -1106,7 +1217,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         LOG_DEBUG("Mark message read");
         std::shared_ptr<MarkMessageReadRequest> markMessageReadRequest =
           std::static_pointer_cast<MarkMessageReadRequest>(p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(markMessageReadRequest->chatId);
+        int64_t chatId = BaseChatId(markMessageReadRequest->chatId);
 
         if (IsSponsoredMessageId(markMessageReadRequest->msgId))
         {
@@ -1160,7 +1271,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<DeleteMessageRequest> deleteMessageRequest =
           std::static_pointer_cast<DeleteMessageRequest>(
           p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(deleteMessageRequest->chatId);
+        int64_t chatId = BaseChatId(deleteMessageRequest->chatId);
         std::vector<std::int64_t> msgIds =
           { StrUtil::NumFromHex<int64_t>(deleteMessageRequest->msgId) };
 
@@ -1192,7 +1303,19 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<DeleteChatRequest> deleteChatRequest =
           std::static_pointer_cast<DeleteChatRequest>(
           p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(deleteChatRequest->chatId);
+        int64_t chatId = BaseChatId(deleteChatRequest->chatId);
+
+        if (deleteChatRequest->chatId.find(s_TopicSeparator) != std::string::npos)
+        {
+          // forum topic: never delete on server, only hide locally until next chat list refresh
+          Status::Clear(m_ProfileId, Status::FlagUpdating);
+          std::shared_ptr<DeleteChatNotify> deleteChatNotify =
+            std::make_shared<DeleteChatNotify>(m_ProfileId);
+          deleteChatNotify->success = true;
+          deleteChatNotify->chatId = deleteChatRequest->chatId;
+          CallMessageHandler(deleteChatNotify);
+          return;
+        }
 
         auto delete_chat = td::td_api::make_object<td::td_api::deleteChat>();
         delete_chat->chat_id_ = chatId;
@@ -1223,7 +1346,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<ArchiveChatRequest> archiveChatRequest =
           std::static_pointer_cast<ArchiveChatRequest>(
           p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(archiveChatRequest->chatId);
+        int64_t chatId = BaseChatId(archiveChatRequest->chatId);
         bool isArchived = archiveChatRequest->isArchived;
 
         auto add_chat_to_list = td::td_api::make_object<td::td_api::addChatToList>();
@@ -1257,7 +1380,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<PinChatRequest> pinChatRequest =
           std::static_pointer_cast<PinChatRequest>(
           p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(pinChatRequest->chatId);
+        int64_t chatId = BaseChatId(pinChatRequest->chatId);
         bool isPinned = pinChatRequest->isPinned;
 
         auto toggle_pin = td::td_api::make_object<td::td_api::toggleChatIsPinned>();
@@ -1284,7 +1407,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         Status::Set(m_ProfileId, Status::FlagUpdating);
         std::shared_ptr<PinMessageRequest> pinMessageRequest =
           std::static_pointer_cast<PinMessageRequest>(p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(pinMessageRequest->chatId);
+        int64_t chatId = BaseChatId(pinMessageRequest->chatId);
         int64_t msgId = StrUtil::NumFromHex<int64_t>(pinMessageRequest->msgId);
 
         if (pinMessageRequest->isPinned)
@@ -1332,11 +1455,17 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<SendTypingRequest> sendTypingRequest =
           std::static_pointer_cast<SendTypingRequest>(
           p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(sendTypingRequest->chatId);
+        int64_t chatId = 0;
+        int32_t topicId = 0;
+        ParseChatId(sendTypingRequest->chatId, chatId, topicId);
         bool isTyping = sendTypingRequest->isTyping;
 
         auto send_chat_action = td::td_api::make_object<td::td_api::sendChatAction>();
         send_chat_action->chat_id_ = chatId;
+        if (topicId != 0)
+        {
+          send_chat_action->topic_id_ = td::td_api::make_object<td::td_api::messageTopicForum>(topicId);
+        }
         if (isTyping)
         {
           send_chat_action->action_ = td::td_api::make_object<td::td_api::chatActionTyping>();
@@ -1400,6 +1529,19 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
 
         std::shared_ptr<CreateChatRequest> createChatRequest =
           std::static_pointer_cast<CreateChatRequest>(p_RequestMessage);
+
+        if (createChatRequest->userId.find(s_TopicSeparator) != std::string::npos)
+        {
+          // forum topic selected from contact list: virtual chat, nothing to create
+          Status::Clear(m_ProfileId, Status::FlagUpdating);
+          ChatInfo chatInfo;
+          chatInfo.id = createChatRequest->userId;
+          std::shared_ptr<CreateChatNotify> createChatNotify = std::make_shared<CreateChatNotify>(m_ProfileId);
+          createChatNotify->success = true;
+          createChatNotify->chatInfo = chatInfo;
+          CallMessageHandler(createChatNotify);
+          return;
+        }
 
         ChatType chatType = ChatPrivate;
         int64_t rawUserId = StrUtil::NumFromHex<int64_t>(createChatRequest->userId);
@@ -1490,7 +1632,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
       {
         std::shared_ptr<SetCurrentChatRequest> setCurrentChatRequest =
           std::static_pointer_cast<SetCurrentChatRequest>(p_RequestMessage);
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(setCurrentChatRequest->chatId);
+        int64_t chatId = BaseChatId(setCurrentChatRequest->chatId);
         if (chatId != m_CurrentChat)
         {
           if (m_CurrentChat != 0)
@@ -1544,7 +1686,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<GetAvailableReactionsRequest> getAvailableReactionsRequest =
           std::static_pointer_cast<GetAvailableReactionsRequest>(p_RequestMessage);
 
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(getAvailableReactionsRequest->chatId);
+        int64_t chatId = BaseChatId(getAvailableReactionsRequest->chatId);
         int64_t msgId = StrUtil::NumFromHex<int64_t>(getAvailableReactionsRequest->msgId);
 
         auto get_available_reactions = td::td_api::make_object<td::td_api::getMessageAvailableReactions>(chatId, msgId, 8 /*row_size_ 5-25*/);
@@ -1576,7 +1718,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<SendReactionRequest> sendReactionRequest =
           std::static_pointer_cast<SendReactionRequest>(p_RequestMessage);
 
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(sendReactionRequest->chatId);
+        int64_t chatId = BaseChatId(sendReactionRequest->chatId);
         int64_t msgId = StrUtil::NumFromHex<int64_t>(sendReactionRequest->msgId);
         std::string emoji = sendReactionRequest->emoji;
         std::string prevEmoji = sendReactionRequest->prevEmoji;
@@ -1649,7 +1791,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<GetUnreadReactionsRequest> getUnreadReactionsRequest =
           std::static_pointer_cast<GetUnreadReactionsRequest>(p_RequestMessage);
 
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(getUnreadReactionsRequest->chatId);
+        int64_t chatId = BaseChatId(getUnreadReactionsRequest->chatId);
 
         auto search_chat_messages = td::td_api::make_object<td::td_api::searchChatMessages>();
         search_chat_messages->chat_id_ = chatId;
@@ -1657,32 +1799,14 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         search_chat_messages->filter_ = td::td_api::make_object<td::td_api::searchMessagesFilterUnreadReaction>();
 
         SendQuery(std::move(search_chat_messages),
-                  [this, chatId](Object object)
+                  [this](Object object)
         {
           if (object->get_id() == td::td_api::error::ID) return;
 
           if (object->get_id() == td::td_api::foundChatMessages::ID)
           {
             auto found_chat_messages = td::move_tl_object_as<td::td_api::foundChatMessages>(object);
-            auto& messages = found_chat_messages->messages_;
-
-            std::vector<ChatMessage> chatMessages;
-            for (auto it = messages.begin(); it != messages.end(); ++it)
-            {
-              auto message = td::move_tl_object_as<td::td_api::message>(*it);
-              ChatMessage chatMessage;
-              TdMessageConvert(*message, chatMessage);
-              chatMessages.push_back(chatMessage);
-            }
-
-            std::shared_ptr<NewMessagesNotify> newMessagesNotify =
-              std::make_shared<NewMessagesNotify>(m_ProfileId);
-            newMessagesNotify->success = true;
-            newMessagesNotify->chatId = StrUtil::NumToHex(chatId);
-            newMessagesNotify->chatMessages = chatMessages;
-            newMessagesNotify->fromMsgId = "";
-            newMessagesNotify->sequence = false;
-            CallMessageHandler(newMessagesNotify);
+            NotifyMessagesByChat(found_chat_messages->messages_, false /*p_Sequence*/);
           }
         });
       }
@@ -1709,7 +1833,7 @@ void TgChat::Impl::PerformRequest(std::shared_ptr<RequestMessage> p_RequestMessa
         std::shared_ptr<GetGroupMembersRequest> getGroupMembersRequest =
           std::static_pointer_cast<GetGroupMembersRequest>(p_RequestMessage);
 
-        int64_t chatId = StrUtil::NumFromHex<int64_t>(getGroupMembersRequest->chatId);
+        int64_t chatId = BaseChatId(getGroupMembersRequest->chatId);
 
         auto search = td::td_api::make_object<td::td_api::searchChatMembers>(
           chatId, "" /*query*/, 200 /*limit*/, nullptr /*filter*/);
@@ -1913,6 +2037,13 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
     std::shared_ptr<NewContactsNotify> newContactsNotify =
       std::make_shared<NewContactsNotify>(m_ProfileId);
     newContactsNotify->contactInfos = std::vector<ContactInfo>({ contactInfo });
+
+    auto forumIt = m_Forums.find(contactId);
+    if (forumIt != m_Forums.end())
+    {
+      forumIt->second.title = update_chat_title.title_;
+    }
+
     CallMessageHandler(newContactsNotify);
   },
   [this](td::td_api::updateUser& update_user)
@@ -1949,14 +2080,17 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
       std::vector<ChatMessage> chatMessages;
       chatMessages.push_back(chatMessage);
 
-      std::shared_ptr<NewMessagesNotify> newMessagesNotify =
-        std::make_shared<NewMessagesNotify>(m_ProfileId);
-      newMessagesNotify->success = true;
-      newMessagesNotify->chatId = StrUtil::NumToHex(message->chat_id_);
-      newMessagesNotify->chatMessages = chatMessages;
-      newMessagesNotify->cached = false;
-      newMessagesNotify->sequence = true;
-      CallMessageHandler(newMessagesNotify);
+      for (const auto& chatId : GetMessageChatIds(*message))
+      {
+        std::shared_ptr<NewMessagesNotify> newMessagesNotify =
+          std::make_shared<NewMessagesNotify>(m_ProfileId);
+        newMessagesNotify->success = true;
+        newMessagesNotify->chatId = chatId;
+        newMessagesNotify->chatMessages = chatMessages;
+        newMessagesNotify->cached = false;
+        newMessagesNotify->sequence = true;
+        CallMessageHandler(newMessagesNotify);
+      }
     }
   },
   [this](td::td_api::updateMessageSendSucceeded& update_message_send_succeeded)
@@ -1971,14 +2105,17 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
     std::vector<ChatMessage> chatMessages;
     chatMessages.push_back(chatMessage);
 
-    std::shared_ptr<NewMessagesNotify> newMessagesNotify =
-      std::make_shared<NewMessagesNotify>(m_ProfileId);
-    newMessagesNotify->success = true;
-    newMessagesNotify->chatId = StrUtil::NumToHex(message->chat_id_);
-    newMessagesNotify->chatMessages = chatMessages;
-    newMessagesNotify->cached = false;
-    newMessagesNotify->sequence = true;
-    CallMessageHandler(newMessagesNotify);
+    for (const auto& chatId : GetMessageChatIds(*message))
+    {
+      std::shared_ptr<NewMessagesNotify> newMessagesNotify =
+        std::make_shared<NewMessagesNotify>(m_ProfileId);
+      newMessagesNotify->success = true;
+      newMessagesNotify->chatId = chatId;
+      newMessagesNotify->chatMessages = chatMessages;
+      newMessagesNotify->cached = false;
+      newMessagesNotify->sequence = true;
+      CallMessageHandler(newMessagesNotify);
+    }
   },
   [this](td::td_api::updateChatAction& user_chat_action)
   {
@@ -2004,12 +2141,28 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
         LOG_TRACE("user %d in chat %d is not typing", userId, chatId);
       }
 
-      std::shared_ptr<ReceiveTypingNotify> receiveTypingNotify =
-        std::make_shared<ReceiveTypingNotify>(m_ProfileId);
-      receiveTypingNotify->chatId = StrUtil::NumToHex(chatId);
-      receiveTypingNotify->userId = StrUtil::NumToHex(userId);
-      receiveTypingNotify->isTyping = isTyping;
-      CallMessageHandler(receiveTypingNotify);
+      int32_t topicId = 0;
+      if (user_chat_action.topic_id_ &&
+          (user_chat_action.topic_id_->get_id() == td::td_api::messageTopicForum::ID))
+      {
+        topicId = static_cast<const td::td_api::messageTopicForum&>(*user_chat_action.topic_id_).forum_topic_id_;
+      }
+
+      std::vector<std::string> chatIds = { StrUtil::NumToHex(chatId) };
+      if (topicId != 0)
+      {
+        chatIds.push_back(MakeChatId(chatId, topicId));
+      }
+
+      for (const auto& notifyChatId : chatIds)
+      {
+        std::shared_ptr<ReceiveTypingNotify> receiveTypingNotify =
+          std::make_shared<ReceiveTypingNotify>(m_ProfileId);
+        receiveTypingNotify->chatId = notifyChatId;
+        receiveTypingNotify->userId = StrUtil::NumToHex(userId);
+        receiveTypingNotify->isTyping = isTyping;
+        CallMessageHandler(receiveTypingNotify);
+      }
     }
   },
   [this](td::td_api::updateUserStatus& user_status)
@@ -2022,13 +2175,13 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("chat read outbox update");
 
-    UpdateLastReadOutboxMessage(chat_read_outbox.chat_id_, chat_read_outbox.last_read_outbox_message_id_);
+    UpdateLastReadOutboxMessage(chat_read_outbox.chat_id_, 0, chat_read_outbox.last_read_outbox_message_id_);
   },
   [this](td::td_api::updateChatReadInbox& chat_read_inbox)
   {
     LOG_TRACE("chat read inbox update");
 
-    UpdateLastReadInboxMessage(chat_read_inbox.chat_id_, chat_read_inbox.last_read_inbox_message_id_);
+    UpdateLastReadInboxMessage(chat_read_inbox.chat_id_, 0, chat_read_inbox.last_read_inbox_message_id_);
   },
   [this](td::td_api::updateDeleteMessages& delete_messages)
   {
@@ -2036,9 +2189,9 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
 
     LOG_TRACE("delete messages update");
 
-    std::string chatId = StrUtil::NumToHex(delete_messages.chat_id_);
     std::vector<std::int64_t> msgIds = delete_messages.message_ids_;
     for (const auto& msgId : msgIds)
+    for (const auto& chatId : ResolveMessageChatIds(delete_messages.chat_id_, msgId))
     {
 #ifdef CUSTOM_MESSAGE_DELETE_SUPPORT
       static const int messageDelete = AppConfig::GetNum("message_delete");
@@ -2150,12 +2303,16 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("update message is pinned");
 
-    std::shared_ptr<NewMessageIsPinnedNotify> newMessageIsPinnedNotify =
-      std::make_shared<NewMessageIsPinnedNotify>(m_ProfileId);
-    newMessageIsPinnedNotify->chatId = StrUtil::NumToHex(update_message_is_pinned.chat_id_);
-    newMessageIsPinnedNotify->msgId = StrUtil::NumToHex(update_message_is_pinned.message_id_);
-    newMessageIsPinnedNotify->isPinned = update_message_is_pinned.is_pinned_;
-    CallMessageHandler(newMessageIsPinnedNotify);
+    for (const auto& chatId : ResolveMessageChatIds(update_message_is_pinned.chat_id_,
+                                                     update_message_is_pinned.message_id_))
+    {
+      std::shared_ptr<NewMessageIsPinnedNotify> newMessageIsPinnedNotify =
+        std::make_shared<NewMessageIsPinnedNotify>(m_ProfileId);
+      newMessageIsPinnedNotify->chatId = chatId;
+      newMessageIsPinnedNotify->msgId = StrUtil::NumToHex(update_message_is_pinned.message_id_);
+      newMessageIsPinnedNotify->isPinned = update_message_is_pinned.is_pinned_;
+      CallMessageHandler(newMessageIsPinnedNotify);
+    }
   },
   [this](td::td_api::updateChatPosition& update_chat_position)
   {
@@ -2165,35 +2322,74 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
     if (position)
     {
       auto chatList = td::move_tl_object_as<td::td_api::ChatList>(position->list_);
+      const std::vector<std::string> chatIds = GetNotifyChatIds(update_chat_position.chat_id_);
+      auto forumIt = m_Forums.find(update_chat_position.chat_id_);
       if (chatList && (chatList->get_id() == td::td_api::chatListMain::ID))
       {
-        std::string chatId = StrUtil::NumToHex(update_chat_position.chat_id_);
         if (position->order_ == 0)
         {
           // position 0 indicates removal
-          LOG_TRACE("delete chat notify %s", chatId.c_str());
+          for (const auto& chatId : chatIds)
+          {
+            LOG_TRACE("delete chat notify %s", chatId.c_str());
 
-          std::shared_ptr<DeleteChatNotify> deleteChatNotify =
-            std::make_shared<DeleteChatNotify>(m_ProfileId);
-          deleteChatNotify->success = true;
-          deleteChatNotify->chatId = chatId;
-          CallMessageHandler(deleteChatNotify);
+            std::shared_ptr<DeleteChatNotify> deleteChatNotify =
+              std::make_shared<DeleteChatNotify>(m_ProfileId);
+            deleteChatNotify->success = true;
+            deleteChatNotify->chatId = chatId;
+            CallMessageHandler(deleteChatNotify);
+          }
         }
         else
         {
           bool isPinned = position->is_pinned_;
-          LOG_TRACE("update pin notify %s %d", chatId.c_str(), isPinned);
+          if (forumIt != m_Forums.end())
+          {
+            forumIt->second.baseChatInfo.isPinned = isPinned;
+            forumIt->second.baseChatInfo.isArchived = false;
+            if (isPinned)
+            {
+              forumIt->second.baseChatInfo.lastMessageTime = position->order_;
+            }
+          }
 
-          std::shared_ptr<UpdatePinNotify> updatePinNotify =
-            std::make_shared<UpdatePinNotify>(m_ProfileId);
-          updatePinNotify->success = true;
-          updatePinNotify->chatId = chatId;
-          updatePinNotify->isPinned = isPinned;
-          updatePinNotify->timePinned = position->order_;
-          CallMessageHandler(updatePinNotify);
+          int64_t pinIndex = 0;
+          for (const auto& chatId : chatIds)
+          {
+            LOG_TRACE("update pin notify %s %d", chatId.c_str(), isPinned);
 
-          // chat appearing in main list means it's unarchived
-          bool isArchived = false;
+            std::shared_ptr<UpdatePinNotify> updatePinNotify =
+              std::make_shared<UpdatePinNotify>(m_ProfileId);
+            updatePinNotify->success = true;
+            updatePinNotify->chatId = chatId;
+            updatePinNotify->isPinned = isPinned;
+            updatePinNotify->timePinned = position->order_ - pinIndex;
+            CallMessageHandler(updatePinNotify);
+            ++pinIndex;
+
+            // chat appearing in main list means it's unarchived
+            bool isArchived = false;
+            LOG_TRACE("update archived notify %s %d", chatId.c_str(), isArchived);
+
+            std::shared_ptr<UpdateArchivedNotify> updateArchivedNotify =
+              std::make_shared<UpdateArchivedNotify>(m_ProfileId);
+            updateArchivedNotify->success = true;
+            updateArchivedNotify->chatId = chatId;
+            updateArchivedNotify->isArchived = isArchived;
+            CallMessageHandler(updateArchivedNotify);
+          }
+        }
+      }
+      else if (chatList && (chatList->get_id() == td::td_api::chatListArchive::ID))
+      {
+        bool isArchived = (position->order_ > 0);
+        if (forumIt != m_Forums.end())
+        {
+          forumIt->second.baseChatInfo.isArchived = isArchived;
+        }
+
+        for (const auto& chatId : chatIds)
+        {
           LOG_TRACE("update archived notify %s %d", chatId.c_str(), isArchived);
 
           std::shared_ptr<UpdateArchivedNotify> updateArchivedNotify =
@@ -2203,19 +2399,6 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
           updateArchivedNotify->isArchived = isArchived;
           CallMessageHandler(updateArchivedNotify);
         }
-      }
-      else if (chatList && (chatList->get_id() == td::td_api::chatListArchive::ID))
-      {
-        std::string chatId = StrUtil::NumToHex(update_chat_position.chat_id_);
-        bool isArchived = (position->order_ > 0);
-        LOG_TRACE("update archived notify %s %d", chatId.c_str(), isArchived);
-
-        std::shared_ptr<UpdateArchivedNotify> updateArchivedNotify =
-          std::make_shared<UpdateArchivedNotify>(m_ProfileId);
-        updateArchivedNotify->success = true;
-        updateArchivedNotify->chatId = chatId;
-        updateArchivedNotify->isArchived = isArchived;
-        CallMessageHandler(updateArchivedNotify);
       }
     }
   },
@@ -2227,50 +2410,71 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
       td::move_tl_object_as<td::td_api::chatNotificationSettings>(update_chat_notification_settings.notification_settings_);
     if (notification_settings_)
     {
-      std::string chatId = StrUtil::NumToHex(update_chat_notification_settings.chat_id_);
+      const int64_t chatIdNum = update_chat_notification_settings.chat_id_;
       bool isMuted = (notification_settings_->mute_for_ > 0);
 
-      LOG_TRACE("update mute notify %s %d", chatId.c_str(), isMuted);
+      auto notifyMute = [this](const std::string& p_ChatId, bool p_IsMuted)
+      {
+        LOG_TRACE("update mute notify %s %d", p_ChatId.c_str(), p_IsMuted);
 
-      std::shared_ptr<UpdateMuteNotify> updateMuteNotify =
-        std::make_shared<UpdateMuteNotify>(m_ProfileId);
-      updateMuteNotify->success = true;
-      updateMuteNotify->chatId = chatId;
-      updateMuteNotify->isMuted = isMuted;
-      CallMessageHandler(updateMuteNotify);
+        std::shared_ptr<UpdateMuteNotify> updateMuteNotify =
+          std::make_shared<UpdateMuteNotify>(m_ProfileId);
+        updateMuteNotify->success = true;
+        updateMuteNotify->chatId = p_ChatId;
+        updateMuteNotify->isMuted = p_IsMuted;
+        CallMessageHandler(updateMuteNotify);
+      };
+
+      auto forumIt = m_Forums.find(chatIdNum);
+      if (forumIt == m_Forums.end())
+      {
+        notifyMute(StrUtil::NumToHex(chatIdNum), isMuted);
+      }
+      else
+      {
+        forumIt->second.baseChatInfo.isMuted = isMuted;
+        for (const auto& topic : forumIt->second.topics)
+        {
+          const bool topicMuted = topic.second.useDefaultMute ? isMuted : topic.second.isMuted;
+          notifyMute(MakeChatId(chatIdNum, topic.first), topicMuted);
+        }
+      }
     }
   },
   [this](td::td_api::updateMessageInteractionInfo& update_message_interaction_info)
   {
     LOG_TRACE("update message interaction info");
 
-    std::string chatId = StrUtil::NumToHex(update_message_interaction_info.chat_id_);
     std::string msgId = StrUtil::NumToHex(update_message_interaction_info.message_id_);
 
-    std::shared_ptr<NewMessageReactionsNotify> newMessageReactionsNotify =
-      std::make_shared<NewMessageReactionsNotify>(m_ProfileId);
-
-    newMessageReactionsNotify->chatId = chatId;
-    newMessageReactionsNotify->msgId = msgId;
-
+    Reactions reactions;
     auto interactionInfo = td::move_tl_object_as<td::td_api::messageInteractionInfo>(update_message_interaction_info.interaction_info_);
     if (interactionInfo)
     {
-      GetMsgReactions(interactionInfo, newMessageReactionsNotify->reactions);
+      GetMsgReactions(interactionInfo, reactions);
 
       std::shared_ptr<MarkMessageReadRequest> markMessageReadRequest =
         std::make_shared<MarkMessageReadRequest>();
-      markMessageReadRequest->chatId = chatId;
+      markMessageReadRequest->chatId = StrUtil::NumToHex(update_message_interaction_info.chat_id_);
       markMessageReadRequest->readAllReactions = true;
       SendRequest(markMessageReadRequest);
     }
     else
     {
-      newMessageReactionsNotify->reactions.needConsolidationWithCache = true;
-      newMessageReactionsNotify->reactions.replaceCount = true;
+      reactions.needConsolidationWithCache = true;
+      reactions.replaceCount = true;
     }
 
-    CallMessageHandler(newMessageReactionsNotify);
+    for (const auto& chatId : ResolveMessageChatIds(update_message_interaction_info.chat_id_,
+                                                     update_message_interaction_info.message_id_))
+    {
+      std::shared_ptr<NewMessageReactionsNotify> newMessageReactionsNotify =
+        std::make_shared<NewMessageReactionsNotify>(m_ProfileId);
+      newMessageReactionsNotify->chatId = chatId;
+      newMessageReactionsNotify->msgId = msgId;
+      newMessageReactionsNotify->reactions = reactions;
+      CallMessageHandler(newMessageReactionsNotify);
+    }
   },
   [this](td::td_api::updateChatUnreadReactionCount& update_chat_unread_reaction_count)
   {
@@ -2328,9 +2532,116 @@ void TgChat::Impl::ProcessUpdate(td::td_api::object_ptr<td::td_api::Object> upda
   {
     LOG_TRACE("update dice emojis");
   },
-  [](td::td_api::updateSupergroup&)
+  [this](td::td_api::updateSupergroup& update_supergroup)
   {
     LOG_TRACE("update supergroup");
+
+    if (!update_supergroup.supergroup_) return;
+
+    // detect forum mode being toggled on/off for an already listed chat
+    const int64_t chatId = -1000000000000LL - update_supergroup.supergroup_->id_;
+    const bool isForum = update_supergroup.supergroup_->is_forum_;
+    const bool wasForum = (m_Forums.count(chatId) > 0);
+    if ((isForum != wasForum) && (m_ChatTypes.count(chatId) > 0) && !update_supergroup.supergroup_->is_channel_)
+    {
+      LOG_DEBUG("forum mode changed for chat %lld: %d", chatId, isForum);
+      if (!isForum)
+      {
+        for (const auto& topic : m_Forums[chatId].topics)
+        {
+          const std::string topicChatId = MakeChatId(chatId, topic.first);
+          std::shared_ptr<DeleteChatNotify> deleteChatNotify =
+            std::make_shared<DeleteChatNotify>(m_ProfileId);
+          deleteChatNotify->success = true;
+          deleteChatNotify->chatId = topicChatId;
+          CallMessageHandler(deleteChatNotify);
+          m_TopicContactInfos.erase(topicChatId);
+        }
+        m_Forums.erase(chatId);
+      }
+
+      std::shared_ptr<DeferGetChatDetailsRequest> deferGetChatDetailsRequest =
+        std::make_shared<DeferGetChatDetailsRequest>();
+      deferGetChatDetailsRequest->chatIds = std::vector<std::string>({ StrUtil::NumToHex(chatId) });
+      SendRequest(deferGetChatDetailsRequest);
+    }
+  },
+  [this](td::td_api::updateForumTopicInfo& update_forum_topic_info)
+  {
+    LOG_TRACE("update forum topic info");
+
+    if (!update_forum_topic_info.info_) return;
+
+    const td::td_api::forumTopicInfo& info = *update_forum_topic_info.info_;
+    auto forumIt = m_Forums.find(info.chat_id_);
+    if (forumIt == m_Forums.end()) return; // chat not (yet) listed as forum
+
+    const std::string topicChatId = MakeChatId(info.chat_id_, info.forum_topic_id_);
+    if (info.is_hidden_)
+    {
+      if (forumIt->second.topics.erase(info.forum_topic_id_) > 0)
+      {
+        m_TopicContactInfos.erase(topicChatId);
+        std::shared_ptr<DeleteChatNotify> deleteChatNotify =
+          std::make_shared<DeleteChatNotify>(m_ProfileId);
+        deleteChatNotify->success = true;
+        deleteChatNotify->chatId = topicChatId;
+        CallMessageHandler(deleteChatNotify);
+      }
+      return;
+    }
+
+    const bool isNew = (forumIt->second.topics.count(info.forum_topic_id_) == 0);
+    ChatInfo chatInfo;
+    ContactInfo contactInfo;
+    AddForumTopic(info.chat_id_, info, chatInfo, contactInfo);
+    NotifyTopicContact(contactInfo);
+
+    if (isNew)
+    {
+      LOG_DEBUG("new forum topic %s \"%s\"", topicChatId.c_str(), info.name_.c_str());
+      chatInfo.lastMessageTime = (((int64_t)info.creation_date_) * 1000);
+      if (chatInfo.isPinned)
+      {
+        chatInfo.lastMessageTime = forumIt->second.baseChatInfo.lastMessageTime;
+      }
+
+      std::shared_ptr<NewChatsNotify> newChatsNotify =
+        std::make_shared<NewChatsNotify>(m_ProfileId);
+      newChatsNotify->success = true;
+      newChatsNotify->chatInfos = std::vector<ChatInfo>({ chatInfo });
+      CallMessageHandler(newChatsNotify);
+    }
+  },
+  [this](td::td_api::updateForumTopic& update_forum_topic)
+  {
+    LOG_TRACE("update forum topic");
+
+    const int64_t chatId = update_forum_topic.chat_id_;
+    const int32_t topicId = update_forum_topic.forum_topic_id_;
+    auto forumIt = m_Forums.find(chatId);
+    if (forumIt == m_Forums.end()) return;
+
+    auto topicIt = forumIt->second.topics.find(topicId);
+    if (topicIt == forumIt->second.topics.end()) return;
+
+    UpdateLastReadOutboxMessage(chatId, topicId, update_forum_topic.last_read_outbox_message_id_);
+    UpdateLastReadInboxMessage(chatId, topicId, update_forum_topic.last_read_inbox_message_id_);
+
+    if (update_forum_topic.notification_settings_)
+    {
+      TopicInfo& topicInfo = topicIt->second;
+      topicInfo.useDefaultMute = update_forum_topic.notification_settings_->use_default_mute_for_;
+      topicInfo.isMuted = (update_forum_topic.notification_settings_->mute_for_ > 0);
+      const bool isMuted = topicInfo.useDefaultMute ? forumIt->second.baseChatInfo.isMuted : topicInfo.isMuted;
+
+      std::shared_ptr<UpdateMuteNotify> updateMuteNotify =
+        std::make_shared<UpdateMuteNotify>(m_ProfileId);
+      updateMuteNotify->success = true;
+      updateMuteNotify->chatId = MakeChatId(chatId, topicId);
+      updateMuteNotify->isMuted = isMuted;
+      CallMessageHandler(updateMuteNotify);
+    }
   },
   [](td::td_api::updateChatTheme&)
   {
@@ -3525,6 +3836,29 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
   {
     p_Text = "[Created]";
   }
+  else if (p_TdMessageContent.get_id() == td::td_api::messageForumTopicCreated::ID)
+  {
+    auto& messageForumTopicCreated = static_cast<td::td_api::messageForumTopicCreated&>(p_TdMessageContent);
+    p_Text = "[Created topic " + messageForumTopicCreated.name_ + "]";
+  }
+  else if (p_TdMessageContent.get_id() == td::td_api::messageForumTopicEdited::ID)
+  {
+    auto& messageForumTopicEdited = static_cast<td::td_api::messageForumTopicEdited&>(p_TdMessageContent);
+    p_Text = messageForumTopicEdited.name_.empty() ? "[Changed topic icon]"
+                                                   : "[Changed topic name to " + messageForumTopicEdited.name_ + "]";
+  }
+  else if (p_TdMessageContent.get_id() == td::td_api::messageForumTopicIsClosedToggled::ID)
+  {
+    auto& messageForumTopicIsClosedToggled =
+      static_cast<td::td_api::messageForumTopicIsClosedToggled&>(p_TdMessageContent);
+    p_Text = messageForumTopicIsClosedToggled.is_closed_ ? "[Closed topic]" : "[Reopened topic]";
+  }
+  else if (p_TdMessageContent.get_id() == td::td_api::messageForumTopicIsHiddenToggled::ID)
+  {
+    auto& messageForumTopicIsHiddenToggled =
+      static_cast<td::td_api::messageForumTopicIsHiddenToggled&>(p_TdMessageContent);
+    p_Text = messageForumTopicIsHiddenToggled.is_hidden_ ? "[Hidden topic]" : "[Unhidden topic]";
+  }
   else if (p_TdMessageContent.get_id() == td::td_api::messageBasicGroupChatCreate::ID)
   {
     p_Text = "[Created]";
@@ -3581,23 +3915,30 @@ void TgChat::Impl::TdMessageConvert(td::td_api::message& p_TdMessage, ChatMessag
 
   p_ChatMessage.hasMention = p_TdMessage.contains_unread_mention_;
 
+  const int32_t topicId = GetMessageTopicId(p_TdMessage);
+  if (topicId != 0)
+  {
+    m_MessageTopics[p_TdMessage.chat_id_][p_TdMessage.id_] = topicId;
+  }
+
+  const ReadKey readKey(p_TdMessage.chat_id_, topicId);
   if (IsSelf(p_TdMessage.chat_id_))
   {
     p_ChatMessage.isRead = true;
   }
   else if (p_TdMessage.is_outgoing_)
   {
-    p_ChatMessage.isRead = (p_TdMessage.id_ <= m_LastReadOutboxMessage[p_TdMessage.chat_id_]);
+    p_ChatMessage.isRead = (p_TdMessage.id_ <= m_LastReadOutboxMessage[readKey]);
     if (!p_ChatMessage.isRead)
     {
-      m_UnreadOutboxMessages[p_TdMessage.chat_id_].insert(p_TdMessage.id_);
+      m_UnreadOutboxMessages[readKey].insert(p_TdMessage.id_);
     }
   }
   else
   {
-    if (m_LastReadInboxMessage.count(p_TdMessage.chat_id_) > 0)
+    if (m_LastReadInboxMessage.count(readKey) > 0)
     {
-      p_ChatMessage.isRead = (p_TdMessage.id_ <= m_LastReadInboxMessage[p_TdMessage.chat_id_]);
+      p_ChatMessage.isRead = (p_TdMessage.id_ <= m_LastReadInboxMessage[readKey]);
     }
     else
     {
@@ -3606,7 +3947,7 @@ void TgChat::Impl::TdMessageConvert(td::td_api::message& p_TdMessage, ChatMessag
 
     if (!p_ChatMessage.isRead)
     {
-      m_UnreadInboxMessages[p_TdMessage.chat_id_].insert(p_TdMessage.id_);
+      m_UnreadInboxMessages[readKey].insert(p_TdMessage.id_);
     }
   }
 
@@ -3883,38 +4224,362 @@ std::string TgChat::Impl::GetContactName(int64_t p_UserId)
   }
 }
 
-void TgChat::Impl::GetChatHistory(int64_t p_ChatId, int64_t p_FromMsgId, int32_t p_Offset, int32_t p_Limit,
-                                  bool p_Sequence)
+void TgChat::Impl::GetChatHistory(int64_t p_ChatId, int32_t p_TopicId, int64_t p_FromMsgId, int32_t p_Offset,
+                                  int32_t p_Limit, bool p_Sequence)
 {
   // *INDENT-OFF*
   Status::Set(m_ProfileId, Status::FlagFetching);
-  SendQuery(td::td_api::make_object<td::td_api::getChatHistory>(p_ChatId, p_FromMsgId, p_Offset,
-                                                                p_Limit, false),
-  [this, p_ChatId, p_FromMsgId, p_Offset, p_Sequence](Object object)
+  auto handler = [this, p_ChatId, p_TopicId, p_FromMsgId, p_Offset, p_Sequence](Object object)
   {
     Status::Clear(m_ProfileId, Status::FlagFetching);
 
-    if (object->get_id() == td::td_api::error::ID) return;
-
-    auto messages = td::move_tl_object_as<td::td_api::messages>(object);
-
-    std::vector<ChatMessage> chatMessages;
-    for (auto it = messages->messages_.begin(); it != messages->messages_.end(); ++it)
+    if (object->get_id() == td::td_api::error::ID)
     {
-      auto message = td::move_tl_object_as<td::td_api::message>(*it);
-      ChatMessage chatMessage;
-      TdMessageConvert(*message, chatMessage);
-      chatMessages.push_back(chatMessage);
+      auto error = td::move_tl_object_as<td::td_api::error>(object);
+      LOG_WARNING("get chat history %lld/%d failed: %s", p_ChatId, p_TopicId, error->message_.c_str());
+      return;
     }
 
-    std::shared_ptr<NewMessagesNotify> newMessagesNotify =
-      std::make_shared<NewMessagesNotify>(m_ProfileId);
-    newMessagesNotify->success = true;
-    newMessagesNotify->chatId = StrUtil::NumToHex(p_ChatId);
-    newMessagesNotify->chatMessages = chatMessages;
-    newMessagesNotify->fromMsgId = ((p_FromMsgId != 0) && (p_Offset == 0)) ? StrUtil::NumToHex(p_FromMsgId) : "";
-    newMessagesNotify->sequence = p_Sequence;
-    CallMessageHandler(newMessagesNotify);
+    auto messages = td::move_tl_object_as<td::td_api::messages>(object);
+    const std::string fromMsgId = ((p_FromMsgId != 0) && (p_Offset == 0)) ? StrUtil::NumToHex(p_FromMsgId) : "";
+
+    if (p_TopicId != 0)
+    {
+      // topic history: all messages belong to the requested virtual chat
+      std::vector<ChatMessage> chatMessages;
+      for (auto it = messages->messages_.begin(); it != messages->messages_.end(); ++it)
+      {
+        auto message = td::move_tl_object_as<td::td_api::message>(*it);
+        ChatMessage chatMessage;
+        TdMessageConvert(*message, chatMessage);
+        chatMessages.push_back(chatMessage);
+      }
+
+      NotifyMessages(MakeChatId(p_ChatId, p_TopicId), chatMessages, fromMsgId, p_Sequence);
+    }
+    else if (p_Sequence)
+    {
+      // plain chat history
+      std::vector<ChatMessage> chatMessages;
+      for (auto it = messages->messages_.begin(); it != messages->messages_.end(); ++it)
+      {
+        auto message = td::move_tl_object_as<td::td_api::message>(*it);
+        ChatMessage chatMessage;
+        TdMessageConvert(*message, chatMessage);
+        chatMessages.push_back(chatMessage);
+      }
+
+      NotifyMessages(StrUtil::NumToHex(p_ChatId), chatMessages, fromMsgId, p_Sequence);
+    }
+    else
+    {
+      // single message fetch (edit/content update): route by the message's own topic
+      NotifyMessagesByChat(messages->messages_, p_Sequence);
+    }
+  };
+
+  if (p_TopicId != 0)
+  {
+    SendQuery(td::td_api::make_object<td::td_api::getForumTopicHistory>(p_ChatId, p_TopicId, p_FromMsgId,
+                                                                        p_Offset, p_Limit), handler);
+  }
+  else
+  {
+    SendQuery(td::td_api::make_object<td::td_api::getChatHistory>(p_ChatId, p_FromMsgId, p_Offset,
+                                                                  p_Limit, false), handler);
+  }
+  // *INDENT-ON*
+}
+
+void TgChat::Impl::NotifyMessages(const std::string& p_ChatId, std::vector<ChatMessage>& p_ChatMessages,
+                                  const std::string& p_FromMsgId, bool p_Sequence)
+{
+  std::shared_ptr<NewMessagesNotify> newMessagesNotify =
+    std::make_shared<NewMessagesNotify>(m_ProfileId);
+  newMessagesNotify->success = true;
+  newMessagesNotify->chatId = p_ChatId;
+  newMessagesNotify->chatMessages = p_ChatMessages;
+  newMessagesNotify->fromMsgId = p_FromMsgId;
+  newMessagesNotify->sequence = p_Sequence;
+  CallMessageHandler(newMessagesNotify);
+}
+
+void TgChat::Impl::NotifyMessagesByChat(std::vector<td::td_api::object_ptr<td::td_api::message>>& p_TdMessages,
+                                        bool p_Sequence)
+{
+  std::map<std::string, std::vector<ChatMessage>> chatMessagesByChat;
+  for (auto it = p_TdMessages.begin(); it != p_TdMessages.end(); ++it)
+  {
+    auto message = td::move_tl_object_as<td::td_api::message>(*it);
+    if (!message) continue;
+
+    ChatMessage chatMessage;
+    TdMessageConvert(*message, chatMessage);
+    for (const auto& chatId : GetMessageChatIds(*message))
+    {
+      chatMessagesByChat[chatId].push_back(chatMessage);
+    }
+  }
+
+  for (auto& chatMessages : chatMessagesByChat)
+  {
+    NotifyMessages(chatMessages.first, chatMessages.second, "" /*p_FromMsgId*/, p_Sequence);
+  }
+}
+
+// Forum topics helpers
+
+std::string TgChat::Impl::MakeChatId(int64_t p_ChatId, int32_t p_TopicId)
+{
+  if (p_TopicId == 0) return StrUtil::NumToHex(p_ChatId);
+
+  return StrUtil::NumToHex(p_ChatId) + s_TopicSeparator + StrUtil::NumToHex(p_TopicId);
+}
+
+void TgChat::Impl::ParseChatId(const std::string& p_ChatIdStr, int64_t& p_ChatId, int32_t& p_TopicId)
+{
+  const size_t sepPos = p_ChatIdStr.find(s_TopicSeparator);
+  if (sepPos == std::string::npos)
+  {
+    p_ChatId = StrUtil::NumFromHex<int64_t>(p_ChatIdStr);
+    p_TopicId = 0;
+  }
+  else
+  {
+    p_ChatId = StrUtil::NumFromHex<int64_t>(p_ChatIdStr.substr(0, sepPos));
+    p_TopicId = StrUtil::NumFromHex<int32_t>(p_ChatIdStr.substr(sepPos + 1));
+  }
+}
+
+int64_t TgChat::Impl::BaseChatId(const std::string& p_ChatIdStr)
+{
+  int64_t chatId = 0;
+  int32_t topicId = 0;
+  ParseChatId(p_ChatIdStr, chatId, topicId);
+  return chatId;
+}
+
+int32_t TgChat::Impl::GetMessageTopicId(const td::td_api::message& p_TdMessage)
+{
+  if (p_TdMessage.topic_id_ && (p_TdMessage.topic_id_->get_id() == td::td_api::messageTopicForum::ID))
+  {
+    return static_cast<const td::td_api::messageTopicForum&>(*p_TdMessage.topic_id_).forum_topic_id_;
+  }
+
+  return 0;
+}
+
+// Chats a message is shown in: the chat itself, plus its forum topic sub-chat if any
+std::vector<std::string> TgChat::Impl::GetMessageChatIds(const td::td_api::message& p_TdMessage)
+{
+  std::vector<std::string> chatIds = { StrUtil::NumToHex(p_TdMessage.chat_id_) };
+  const int32_t topicId = GetMessageTopicId(p_TdMessage);
+  if (topicId != 0)
+  {
+    chatIds.push_back(MakeChatId(p_TdMessage.chat_id_, topicId));
+  }
+
+  return chatIds;
+}
+
+// Same as GetMessageChatIds, for updates that only carry chat id + message id
+std::vector<std::string> TgChat::Impl::ResolveMessageChatIds(int64_t p_ChatId, int64_t p_MsgId)
+{
+  std::vector<std::string> chatIds = { StrUtil::NumToHex(p_ChatId) };
+  auto forumIt = m_Forums.find(p_ChatId);
+  if (forumIt == m_Forums.end()) return chatIds;
+
+  auto chatTopicsIt = m_MessageTopics.find(p_ChatId);
+  if (chatTopicsIt != m_MessageTopics.end())
+  {
+    auto msgIt = chatTopicsIt->second.find(p_MsgId);
+    if (msgIt != chatTopicsIt->second.end())
+    {
+      chatIds.push_back(MakeChatId(p_ChatId, msgIt->second));
+      return chatIds;
+    }
+  }
+
+  // not seen this session, check message cache of each topic
+  const std::string msgId = StrUtil::NumToHex(p_MsgId);
+  for (const auto& topic : forumIt->second.topics)
+  {
+    const std::string topicChatId = MakeChatId(p_ChatId, topic.first);
+    std::vector<ChatMessage> chatMessages;
+    if (MessageCache::GetOneMessage(m_ProfileId, topicChatId, msgId, chatMessages))
+    {
+      m_MessageTopics[p_ChatId][p_MsgId] = topic.first;
+      chatIds.push_back(topicChatId);
+      break;
+    }
+  }
+
+  return chatIds;
+}
+
+// chat ids to notify for chat-level updates: the chat itself, plus all its topics if it is a forum
+std::vector<std::string> TgChat::Impl::GetNotifyChatIds(int64_t p_ChatId)
+{
+  std::vector<std::string> chatIds = { StrUtil::NumToHex(p_ChatId) };
+  auto forumIt = m_Forums.find(p_ChatId);
+  if (forumIt != m_Forums.end())
+  {
+    for (const auto& topic : forumIt->second.topics)
+    {
+      chatIds.push_back(MakeChatId(p_ChatId, topic.first));
+    }
+  }
+
+  return chatIds;
+}
+
+void TgChat::Impl::NotifyTopicContact(const ContactInfo& p_ContactInfo)
+{
+  {
+    std::unique_lock<std::mutex> lock(m_Mutex);
+    m_TopicContactInfos[p_ContactInfo.id] = p_ContactInfo;
+  }
+
+  std::shared_ptr<NewContactsNotify> newContactsNotify =
+    std::make_shared<NewContactsNotify>(m_ProfileId);
+  newContactsNotify->contactInfos = std::vector<ContactInfo>({ p_ContactInfo });
+  CallMessageHandler(newContactsNotify);
+}
+
+// Register topic and build its chat / contact info from chat-level state (unread and time set by caller)
+bool TgChat::Impl::AddForumTopic(int64_t p_ChatId, const td::td_api::forumTopicInfo& p_Info, ChatInfo& p_ChatInfo,
+                                 ContactInfo& p_ContactInfo)
+{
+  auto forumIt = m_Forums.find(p_ChatId);
+  if (forumIt == m_Forums.end()) return false;
+
+  TopicInfo& topicInfo = forumIt->second.topics[p_Info.forum_topic_id_];
+  topicInfo.name = p_Info.name_;
+  topicInfo.isClosed = p_Info.is_closed_;
+
+  const ChatInfo& baseChatInfo = forumIt->second.baseChatInfo;
+  p_ChatInfo.id = MakeChatId(p_ChatId, p_Info.forum_topic_id_);
+  p_ChatInfo.isMuted = topicInfo.useDefaultMute ? baseChatInfo.isMuted : topicInfo.isMuted;
+  p_ChatInfo.isPinned = baseChatInfo.isPinned;
+  p_ChatInfo.isArchived = baseChatInfo.isArchived;
+  p_ChatInfo.lastMessageTime = baseChatInfo.lastMessageTime;
+
+  p_ContactInfo.id = p_ChatInfo.id;
+  p_ContactInfo.name = p_Info.name_; // UI prefixes parent chat name where needed
+  p_ContactInfo.isSelf = false;
+
+  return true;
+}
+
+void TgChat::Impl::GetForumTopics(int64_t p_ChatId, int32_t p_OffsetDate, int64_t p_OffsetMsgId,
+                                  int32_t p_OffsetTopicId)
+{
+  // *INDENT-OFF*
+  static const int32_t limit = 100;
+  Status::Set(m_ProfileId, Status::FlagFetching);
+  auto get_forum_topics =
+    td::td_api::make_object<td::td_api::getForumTopics>(p_ChatId, "" /*query*/, p_OffsetDate, p_OffsetMsgId,
+                                                        p_OffsetTopicId, limit);
+  SendQuery(std::move(get_forum_topics),
+            [this, p_ChatId](Object object)
+  {
+    Status::Clear(m_ProfileId, Status::FlagFetching);
+
+    if (object->get_id() == td::td_api::error::ID)
+    {
+      auto error = td::move_tl_object_as<td::td_api::error>(object);
+      LOG_WARNING("get forum topics %lld failed: %s", p_ChatId, error->message_.c_str());
+      return;
+    }
+
+    auto forum_topics = td::move_tl_object_as<td::td_api::forumTopics>(object);
+    if (!forum_topics) return;
+
+    auto forumIt = m_Forums.find(p_ChatId);
+    if (forumIt == m_Forums.end()) return;
+
+    const ChatInfo& baseChatInfo = forumIt->second.baseChatInfo;
+    std::vector<ChatInfo> chatInfos;
+    std::vector<ContactInfo> contactInfos;
+    int64_t pinIndex = 0;
+    for (auto& forum_topic : forum_topics->topics_)
+    {
+      if (!forum_topic || !forum_topic->info_) continue;
+
+      const td::td_api::forumTopicInfo& info = *forum_topic->info_;
+      if (info.is_hidden_) continue;
+
+      const int32_t topicId = info.forum_topic_id_;
+      TopicInfo& topicInfo = forumIt->second.topics[topicId];
+      if (forum_topic->notification_settings_)
+      {
+        topicInfo.useDefaultMute = forum_topic->notification_settings_->use_default_mute_for_;
+        topicInfo.isMuted = (forum_topic->notification_settings_->mute_for_ > 0);
+      }
+
+      ChatInfo chatInfo;
+      ContactInfo contactInfo;
+      if (!AddForumTopic(p_ChatId, info, chatInfo, contactInfo)) continue;
+
+      chatInfo.isUnread = (forum_topic->unread_count_ > 0);
+      chatInfo.isUnreadMention = (forum_topic->unread_mention_count_ > 0);
+      if (baseChatInfo.isPinned)
+      {
+        chatInfo.lastMessageTime = baseChatInfo.lastMessageTime - pinIndex;
+        ++pinIndex;
+      }
+      else if (forum_topic->last_message_)
+      {
+        const int64_t lastMessageTimeSec = forum_topic->last_message_->date_;
+        const int64_t lastMessageHash =
+          std::hash<std::string>{ } (StrUtil::NumToHex(forum_topic->last_message_->id_)) % 256;
+        chatInfo.lastMessageTime = (lastMessageTimeSec * 1000) + lastMessageHash;
+      }
+      else
+      {
+        chatInfo.lastMessageTime = (((int64_t)info.creation_date_) * 1000);
+      }
+
+      {
+        std::unique_lock<std::mutex> lock(m_Mutex);
+        m_TopicContactInfos[contactInfo.id] = contactInfo;
+      }
+
+      LOG_DEBUG("forum topic %s \"%s\" muted %d pinned %d time %lld unread %d", chatInfo.id.c_str(),
+                info.name_.c_str(), chatInfo.isMuted, chatInfo.isPinned, chatInfo.lastMessageTime, chatInfo.isUnread);
+
+      chatInfos.push_back(chatInfo);
+      contactInfos.push_back(contactInfo);
+
+      UpdateLastReadOutboxMessage(p_ChatId, topicId, forum_topic->last_read_outbox_message_id_);
+      UpdateLastReadInboxMessage(p_ChatId, topicId, forum_topic->last_read_inbox_message_id_);
+    }
+
+    LOG_DEBUG("forum %lld topics %d (total %d)", p_ChatId, (int)chatInfos.size(), forum_topics->total_count_);
+
+    if (!contactInfos.empty())
+    {
+      std::shared_ptr<NewContactsNotify> newContactsNotify =
+        std::make_shared<NewContactsNotify>(m_ProfileId);
+      newContactsNotify->contactInfos = contactInfos;
+      CallMessageHandler(newContactsNotify);
+    }
+
+    if (!chatInfos.empty())
+    {
+      std::shared_ptr<NewChatsNotify> newChatsNotify =
+        std::make_shared<NewChatsNotify>(m_ProfileId);
+      newChatsNotify->success = true;
+      newChatsNotify->chatInfos = chatInfos;
+      CallMessageHandler(newChatsNotify);
+    }
+
+    // fetch next page if any
+    if (((int32_t)forum_topics->topics_.size() >= limit) && (forum_topics->next_offset_forum_topic_id_ != 0))
+    {
+      GetForumTopics(p_ChatId, forum_topics->next_offset_date_, forum_topics->next_offset_message_id_,
+                     forum_topics->next_offset_forum_topic_id_);
+    }
   });
   // *INDENT-ON*
 }
@@ -4096,23 +4761,27 @@ int64_t TgChat::Impl::GetDummyUserId(const std::string& p_Name)
   return id;
 }
 
-void TgChat::Impl::UpdateLastReadOutboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId)
+void TgChat::Impl::UpdateLastReadOutboxMessage(int64_t p_ChatId, int32_t p_TopicId, int64_t p_LastReadMsgId)
 {
-  m_LastReadOutboxMessage[p_ChatId] = p_LastReadMsgId;
+  const ReadKey readKey(p_ChatId, p_TopicId);
+  m_LastReadOutboxMessage[readKey] = p_LastReadMsgId;
 
-  std::set<int64_t>& unreadMessages = m_UnreadOutboxMessages[p_ChatId];
+  std::set<int64_t>& unreadMessages = m_UnreadOutboxMessages[readKey];
   if (!unreadMessages.empty())
   {
     for (auto it = unreadMessages.begin(); it != unreadMessages.end(); /* inc in loop */)
     {
       if (*it <= p_LastReadMsgId)
       {
-        std::shared_ptr<NewMessageStatusNotify> newMessageStatusNotify =
-          std::make_shared<NewMessageStatusNotify>(m_ProfileId);
-        newMessageStatusNotify->chatId = StrUtil::NumToHex(p_ChatId);
-        newMessageStatusNotify->msgId = StrUtil::NumToHex(*it);
-        newMessageStatusNotify->isRead = true;
-        CallMessageHandler(newMessageStatusNotify);
+        for (int32_t topicId : std::set<int32_t>({ 0, p_TopicId }))
+        {
+          std::shared_ptr<NewMessageStatusNotify> newMessageStatusNotify =
+            std::make_shared<NewMessageStatusNotify>(m_ProfileId);
+          newMessageStatusNotify->chatId = MakeChatId(p_ChatId, topicId);
+          newMessageStatusNotify->msgId = StrUtil::NumToHex(*it);
+          newMessageStatusNotify->isRead = true;
+          CallMessageHandler(newMessageStatusNotify);
+        }
 
         it = unreadMessages.erase(it);
       }
@@ -4124,23 +4793,27 @@ void TgChat::Impl::UpdateLastReadOutboxMessage(int64_t p_ChatId, int64_t p_LastR
   }
 }
 
-void TgChat::Impl::UpdateLastReadInboxMessage(int64_t p_ChatId, int64_t p_LastReadMsgId)
+void TgChat::Impl::UpdateLastReadInboxMessage(int64_t p_ChatId, int32_t p_TopicId, int64_t p_LastReadMsgId)
 {
-  m_LastReadInboxMessage[p_ChatId] = p_LastReadMsgId;
+  const ReadKey readKey(p_ChatId, p_TopicId);
+  m_LastReadInboxMessage[readKey] = p_LastReadMsgId;
 
-  std::set<int64_t>& unreadMessages = m_UnreadInboxMessages[p_ChatId];
+  std::set<int64_t>& unreadMessages = m_UnreadInboxMessages[readKey];
   if (!unreadMessages.empty())
   {
     for (auto it = unreadMessages.begin(); it != unreadMessages.end(); /* inc in loop */)
     {
       if (*it <= p_LastReadMsgId)
       {
-        std::shared_ptr<NewMessageStatusNotify> newMessageStatusNotify =
-          std::make_shared<NewMessageStatusNotify>(m_ProfileId);
-        newMessageStatusNotify->chatId = StrUtil::NumToHex(p_ChatId);
-        newMessageStatusNotify->msgId = StrUtil::NumToHex(*it);
-        newMessageStatusNotify->isRead = true;
-        CallMessageHandler(newMessageStatusNotify);
+        for (int32_t topicId : std::set<int32_t>({ 0, p_TopicId }))
+        {
+          std::shared_ptr<NewMessageStatusNotify> newMessageStatusNotify =
+            std::make_shared<NewMessageStatusNotify>(m_ProfileId);
+          newMessageStatusNotify->chatId = MakeChatId(p_ChatId, topicId);
+          newMessageStatusNotify->msgId = StrUtil::NumToHex(*it);
+          newMessageStatusNotify->isRead = true;
+          CallMessageHandler(newMessageStatusNotify);
+        }
 
         it = unreadMessages.erase(it);
       }

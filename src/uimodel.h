@@ -39,6 +39,7 @@ private:
     void OnKeyToggleHelp();
     void OnKeyToggleList();
     void OnKeyToggleTop();
+    void OnKeyToggleSubChats();
     void OnKeyToggleEmoji();
     void OnKeySendMsg();
     void SendMessage();
@@ -97,6 +98,8 @@ private:
     void UpdateChatInfoIsUnread(const std::string& p_ProfileId, const std::string& p_ChatId);
     std::string GetContactName(const std::string& p_ProfileId, const std::string& p_ChatId);
     std::string GetContactNameIncludingSelf(const std::string& p_ProfileId, const std::string& p_ChatId);
+    std::string GetParentChatId(const std::string& p_ProfileId, const std::string& p_ChatId);
+    std::string GetChatListName(const std::string& p_ProfileId, const std::string& p_ChatId);
     std::string GetContactListName(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_AllowId,
                                    bool p_AllowAlias);
     std::string GetContactPhone(const std::string& p_ProfileId, const std::string& p_ChatId);
@@ -110,6 +113,7 @@ private:
 
     std::vector<std::pair<std::string, std::string>>& GetChatVec();
     std::vector<std::pair<std::string, std::string>>& GetChatVecLock();
+    std::vector<std::pair<std::string, std::string>>& GetAllChatVec();
     std::unordered_map<std::string, std::unordered_map<std::string, ContactInfo>> GetContactInfos();
     int64_t GetContactInfosUpdateTime();
     int64_t GetGroupMembersUpdateTime();
@@ -243,7 +247,9 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Protocol>> m_Protocols;
 
     std::unordered_map<std::string, std::unordered_set<std::string>> m_ChatSet;
-    std::vector<std::pair<std::string, std::string>> m_ChatVec;
+    std::vector<std::pair<std::string, std::string>> m_ChatVec; // listed chats (sub-chats only when expanded)
+    std::vector<std::pair<std::string, std::string>> m_AllChatVec; // all chats incl. sub-chats, in tree order
+    std::set<std::pair<std::string, std::string>> m_CollapsedChats; // parent chats with sub-chats hidden
     std::unordered_map<std::string, std::unordered_map<std::string, ChatInfo>> m_ChatInfos;
     std::unordered_map<std::string, std::unordered_map<std::string, ContactInfo>> m_ContactInfos;
     int64_t m_ContactInfosUpdateTime = 0;
@@ -253,6 +259,9 @@ private:
     std::pair<std::string, std::string> m_CurrentChat;
     int m_CurrentChatIndex = -1;
     static const std::pair<std::string, std::string> s_ChatNone;
+    static const std::string s_SubChatSeparator;
+    static const std::string s_SubChatIndent;
+    bool SelectListedChat(const std::pair<std::string, std::string>& p_Chat);
 
     std::string m_EditMessageId;
     std::string m_ProtocolUiControl;
@@ -323,6 +332,7 @@ public:
 
   void GetAvailableEmojis(std::set<std::string>& p_AvailableEmojis, bool& p_Pending);
   std::vector<std::pair<std::string, std::string>> GetChatVec();
+  std::vector<std::pair<std::string, std::string>> GetAllChatVec();
   std::string GetContactListName(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_AllowId,
                                  bool p_AllowAlias);
   bool IsContactSelf(const std::string& p_ProfileId, const std::string& p_ContactId);
@@ -349,6 +359,7 @@ public:
   std::string GetContactListNameLocked(const std::string& p_ProfileId, const std::string& p_ChatId, bool p_AllowId,
                                        bool p_AllowAlias);
   std::string GetContactNameLocked(const std::string& p_ProfileId, const std::string& p_ChatId);
+  std::string GetChatListNameLocked(const std::string& p_ProfileId, const std::string& p_ChatId);
   std::string GetContactPhoneLocked(const std::string& p_ProfileId, const std::string& p_ChatId);
   int GetCurrentChatIndexLocked();
   std::pair<std::string, std::string>& GetCurrentChatLocked();
