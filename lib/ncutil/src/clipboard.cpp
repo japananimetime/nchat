@@ -22,6 +22,7 @@
 #include "clip.h"
 #include "fileutil.h"
 #include "log.h"
+#include "strutil.h"
 #include "sysutil.h"
 
 enum class DisplayServer
@@ -326,4 +327,61 @@ bool Clipboard::GetImage(const std::string& p_Path)
   UNUSED(p_Path);
   return false;
 #endif
+}
+
+bool Clipboard::SetImage(const std::string& p_Path)
+{
+  static const std::string clipboardCopyImageCommand = []()
+  {
+    std::string command = AppConfig::GetStr("clipboard_copy_image_command");
+    if (command.empty() && IsDisplayServer(DisplayServer::Wayland))
+    {
+      command = "wl-copy --type image/png";
+    }
+    else if (command.empty() && IsDisplayServer(DisplayServer::X11) &&
+             SysUtil::RunCommand("command -v xclip"))
+    {
+      command = "xclip -selection clipboard -t image/png -i";
+    }
+    return command;
+  }();
+
+  if (clipboardCopyImageCommand.empty())
+  {
+    LOG_WARNING("no clipboard image copy command available");
+    return false;
+  }
+
+  // most consumers only request image/png, so convert other formats first
+  std::string pngPath = p_Path;
+  std::string tempPath;
+  if (FileUtil::GetMimeType(p_Path) != "image/png")
+  {
+    static const bool hasMagick = SysUtil::RunCommand("command -v magick");
+    if (!hasMagick)
+    {
+      LOG_WARNING("magick not found, cannot convert %s to png", p_Path.c_str());
+      return false;
+    }
+
+    tempPath = FileUtil::GetTempDir() + "/clipboard.png";
+    const std::string convertCmd = "magick '" + StrUtil::EscapeSingleQuote(p_Path) + "[0]' '" +
+      StrUtil::EscapeSingleQuote(tempPath) + "'";
+    if (!SysUtil::RunCommand(convertCmd))
+    {
+      FileUtil::RmFile(tempPath);
+      return false;
+    }
+
+    pngPath = tempPath;
+  }
+
+  const std::string cmd = "cat '" + StrUtil::EscapeSingleQuote(pngPath) + "' | " + clipboardCopyImageCommand;
+  const bool rv = SysUtil::RunCommand(cmd);
+  if (!tempPath.empty())
+  {
+    FileUtil::RmFile(tempPath);
+  }
+
+  return rv;
 }

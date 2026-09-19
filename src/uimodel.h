@@ -74,6 +74,8 @@ private:
     void RunProgram(const std::string& p_Cmd);
     void OnKeyOpenLink();
     std::string OnKeySaveAttachment(std::string p_FilePath = std::string());
+    void CopyAttachment(const std::string& p_FilePath);
+    bool GetSelectedMessageImageAttachment(std::string& p_FilePath);
     void TransferFile(const std::vector<std::string>& p_FilePaths);
     void InsertEmoji(const std::wstring& p_Emoji);
     void InsertText(const std::wstring& p_Text);

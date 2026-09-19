@@ -8,6 +8,7 @@
 #include "uimodel.h"
 
 #include <algorithm>
+#include <set>
 
 #include <ncurses.h>
 #include <sys/ioctl.h>
@@ -1360,6 +1361,57 @@ std::string UiModel::Impl::OnKeySaveAttachment(std::string p_FilePath /*= std::s
   return dstFilePath;
 }
 
+bool UiModel::Impl::GetSelectedMessageImageAttachment(std::string& p_FilePath)
+{
+  std::string profileId = m_CurrentChat.first;
+  std::string chatId = m_CurrentChat.second;
+  const std::vector<std::string>& messageVec = m_MessageVec[profileId][chatId];
+  const int messageOffset = m_MessageOffset[profileId][chatId];
+  const std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
+
+  auto it = std::next(messageVec.begin(), messageOffset);
+  if (it == messageVec.end()) return false;
+
+  auto mit = messages.find(*it);
+  if ((mit == messages.end()) || mit->second.fileInfo.empty()) return false;
+
+  FileInfo fileInfo = ProtocolUtil::FileInfoFromHex(mit->second.fileInfo);
+  bool isImage = false;
+  if (!fileInfo.fileType.empty())
+  {
+    isImage = (fileInfo.fileType.rfind("image/", 0) == 0);
+  }
+  else if ((fileInfo.filePath == "[Photo]") || (fileInfo.filePath == "[Sticker]"))
+  {
+    // placeholder path of not yet downloaded telegram media
+    isImage = true;
+  }
+  else if (FileUtil::Exists(fileInfo.filePath))
+  {
+    isImage = (FileUtil::GetMimeType(fileInfo.filePath).rfind("image/", 0) == 0);
+  }
+  else
+  {
+    static const std::set<std::string> imageExts = { ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp" };
+    isImage = (imageExts.count(StrUtil::ToLower(FileUtil::GetFileExt(fileInfo.filePath))) > 0);
+  }
+
+  if (!isImage) return false;
+
+  // empty path = download started, copied on completion
+  GetMessageAttachmentPath(p_FilePath, DownloadFileActionCopy);
+  return true;
+}
+
+void UiModel::Impl::CopyAttachment(const std::string& p_FilePath)
+{
+  if (!Clipboard::SetImage(p_FilePath))
+  {
+    // fall back to copying the file path
+    Clipboard::SetText(p_FilePath);
+  }
+}
+
 void UiModel::Impl::TransferFile(const std::vector<std::string>& p_FilePaths)
 {
   AnyUserKeyInput();
@@ -2027,6 +2079,14 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
           if (!fileInfo.filePath.empty())
           {
             OnKeySaveAttachment(fileInfo.filePath);
+          }
+        }
+        else if (downloadFileAction == DownloadFileActionCopy)
+        {
+          FileInfo fileInfo = ProtocolUtil::FileInfoFromHex(fileInfoStr);
+          if (!fileInfo.filePath.empty())
+          {
+            CopyAttachment(fileInfo.filePath);
           }
         }
 
@@ -3590,8 +3650,20 @@ void UiModel::Impl::Copy()
 
   if (GetSelectMessageActive())
   {
-    std::string text = UiModel::Impl::GetSelectedMessageText();
-    Clipboard::SetText(text);
+    // copy attached image itself (downloading it first if needed), else message text
+    std::string filePath;
+    if (GetSelectedMessageImageAttachment(filePath))
+    {
+      if (!filePath.empty())
+      {
+        CopyAttachment(filePath);
+      }
+    }
+    else
+    {
+      std::string text = UiModel::Impl::GetSelectedMessageText();
+      Clipboard::SetText(text);
+    }
   }
   else
   {

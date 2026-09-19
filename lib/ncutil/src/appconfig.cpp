@@ -24,6 +24,7 @@ void AppConfig::Init()
     { "cache_enabled", "1" },
     { "cache_read_only", "0" },
     { "clipboard_copy_command", "" },
+    { "clipboard_copy_image_command", "" },
     { "clipboard_has_image_command", "" },
     { "clipboard_paste_command", "" },
     { "clipboard_paste_image_command", "" },

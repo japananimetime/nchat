@@ -221,6 +221,7 @@ enum DownloadFileAction
   DownloadFileActionNone = 0,
   DownloadFileActionOpen = 1,
   DownloadFileActionSave = 2,
+  DownloadFileActionCopy = 3,
 };
 
 // Request messages

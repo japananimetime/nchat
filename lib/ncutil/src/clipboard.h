@@ -17,4 +17,5 @@ public:
 
   static bool HasImage();
   static bool GetImage(const std::string& p_Path);
+  static bool SetImage(const std::string& p_Path);
 };
