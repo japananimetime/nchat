@@ -334,22 +334,37 @@ bool UiImagePreview::TakeUpdated()
   return s_Updated.exchange(false);
 }
 
+static void WriteOut(const std::string& p_Str)
+{
+  fflush(stdout);
+  size_t pos = 0;
+  while (pos < p_Str.size())
+  {
+    ssize_t rv = write(STDOUT_FILENO, p_Str.data() + pos, p_Str.size() - pos);
+    if (rv <= 0) break;
+
+    pos += rv;
+  }
+}
+
+void UiImagePreview::BeginSync()
+{
+  WriteOut("\033[?2026h");
+}
+
+void UiImagePreview::EndSync()
+{
+  WriteOut("\033[?2026l");
+}
+
 void UiImagePreview::Output(const std::string& p_Sixel, int p_Y, int p_X)
 {
   // save cursor, position, draw, restore cursor
   std::string out = "\0337\033[" + std::to_string(p_Y + 1) + ";" + std::to_string(p_X + 1) + "H";
   out += p_Sixel;
   out += "\0338";
-
-  fflush(stdout);
-  size_t pos = 0;
-  while (pos < out.size())
-  {
-    ssize_t rv = write(STDOUT_FILENO, out.data() + pos, out.size() - pos);
-    if (rv <= 0) break;
-
-    pos += rv;
-  }
+  LOG_DEBUG("preview output at %d,%d size %d", p_Y, p_X, (int)p_Sixel.size());
+  WriteOut(out);
 }
 
 void UiImagePreview::Suppress(bool p_Suppress)

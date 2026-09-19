@@ -47,6 +47,10 @@ public:
   // write sixel at given 0-based screen position, bypassing curses
   static void Output(const std::string& p_Sixel, int p_Y, int p_X);
 
+  // synchronized output (DEC mode 2026), terminal defers rendering until end
+  static void BeginSync();
+  static void EndSync();
+
   // suppress output while modal dialogs are shown (nestable)
   static void Suppress(bool p_Suppress);
   static bool IsSuppressed();

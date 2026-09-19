@@ -96,13 +96,6 @@ void UiHistoryView::Draw()
   m_HistoryShowCount = 0;
 
   // image previews are reserved as blank lines, and drawn as sixels after curses refresh
-  struct PreviewPlacement
-  {
-    int y = 0;
-    std::string path;
-    bool playIcon = false;
-    std::string label;
-  };
   std::vector<PreviewPlacement> previewPlacements;
   int previewMaxW = 0;
   int previewMaxH = 0;
@@ -555,29 +548,108 @@ void UiHistoryView::Draw()
     firstMessage = false;
   }
 
-  // repaint all cells to clear any previously drawn sixels
-  static bool hadPreviews = false;
-  if (previewActive && (hadPreviews || !previewPlacements.empty()))
+  if (!previewActive || UiImagePreview::IsSuppressed())
+  {
+    // sixels are cleared by dialogs, so redraw all once no longer suppressed
+    m_PrevValid = false;
+    wrefresh(m_PaddedWin);
+    return;
+  }
+
+  // Sixels are unknown to curses, which only outputs changed cells. A sixel thus stays intact
+  // as long as its (blank) cells are unchanged. If placements changed, repaint all cells to clear
+  // previous sixels and redraw all. Otherwise only redraw sixels not yet shown, or drawn over.
+  const std::vector<size_t> rowHashes = GetRowHashes();
+  const bool hadPreviews = m_PrevValid && !m_PrevPlacements.empty();
+  const bool fullRedraw = !m_PrevValid || !(previewPlacements == m_PrevPlacements);
+  const int previewRows = UiImagePreview::GetRows();
+  std::vector<size_t> redrawIndexes;
+  for (size_t i = 0; i < previewPlacements.size(); ++i)
+  {
+    bool rowsChanged = false;
+    for (int row = previewPlacements[i].y; !fullRedraw && (row < previewPlacements[i].y + previewRows); ++row)
+    {
+      rowsChanged = rowsChanged || (row >= (int)rowHashes.size()) || (row >= (int)m_PrevRowHashes.size()) ||
+        (rowHashes[row] != m_PrevRowHashes[row]);
+    }
+
+    if (fullRedraw || rowsChanged || (m_PrevShown.count(i) == 0))
+    {
+      redrawIndexes.push_back(i);
+    }
+  }
+
+  const bool clearPrevious = fullRedraw && (hadPreviews || !m_PrevValid);
+  const bool sync = clearPrevious || !redrawIndexes.empty();
+  if (sync)
+  {
+    // avoid flicker from intermediate state without sixels
+    UiImagePreview::BeginSync();
+  }
+
+  if (clearPrevious)
   {
     redrawwin(m_PaddedWin);
   }
 
-  hadPreviews = previewActive && !previewPlacements.empty();
-
   wrefresh(m_PaddedWin);
 
-  if (UiImagePreview::IsSuppressed()) return;
-
-  for (const auto& placement : previewPlacements)
+  if (fullRedraw)
   {
+    m_PrevShown.clear();
+  }
+
+  for (size_t i : redrawIndexes)
+  {
+    const PreviewPlacement& placement = previewPlacements[i];
     std::shared_ptr<const std::string> sixel =
       UiImagePreview::GetSixel(placement.path, previewMaxW, previewMaxH, placement.playIcon,
-                             placement.label);
+                               placement.label);
     if (sixel)
     {
       UiImagePreview::Output(*sixel, m_PaddedY + placement.y, m_PaddedX);
+      m_PrevShown.insert(i);
+    }
+    else
+    {
+      m_PrevShown.erase(i);
     }
   }
+
+  if (sync)
+  {
+    UiImagePreview::EndSync();
+  }
+
+  m_PrevValid = true;
+  m_PrevPlacements = previewPlacements;
+  m_PrevRowHashes = rowHashes;
+}
+
+std::vector<size_t> UiHistoryView::GetRowHashes()
+{
+  std::vector<size_t> rowHashes(m_PaddedH, 0);
+  std::vector<cchar_t> cells(m_PaddedW + 1);
+  for (int row = 0; row < m_PaddedH; ++row)
+  {
+    std::fill(cells.begin(), cells.end(), cchar_t());
+    mvwin_wchnstr(m_PaddedWin, row, 0, cells.data(), m_PaddedW);
+    size_t hash = 0;
+    for (int col = 0; col < m_PaddedW; ++col)
+    {
+      wchar_t wch[CCHARW_MAX + 1] = { 0 };
+      attr_t attrs = 0;
+      short pair = 0;
+      getcchar(&cells[col], wch, &attrs, &pair, nullptr);
+      hash = (hash * 31) + std::hash<std::wstring>()(wch);
+      hash = (hash * 31) + attrs;
+      hash = (hash * 31) + pair;
+    }
+
+    rowHashes[row] = hash;
+  }
+
+  return rowHashes;
 }
 
 int UiHistoryView::GetHistoryShowCount()
