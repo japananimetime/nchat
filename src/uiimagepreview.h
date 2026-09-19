@@ -28,12 +28,15 @@ public:
   static bool IsPreviewable(const std::string& p_Path);
 
   // returns sixel data, or nullptr if not yet encoded (encoding is queued) or failed,
-  // play icon is overlaid for video thumbnails
+  // play icon and label (e.g. duration) are overlaid for video thumbnails
   static std::shared_ptr<const std::string> GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH,
-                                                     bool p_PlayIcon);
+                                                     bool p_PlayIcon, const std::string& p_Label);
+
+  static std::string FormatDuration(int p_Seconds);
 
   // true if encoding was attempted and failed
-  static bool IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon);
+  static bool IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon,
+                       const std::string& p_Label);
 
   // true the first time called for given id, used to request thumbnail downloads once
   static bool MarkRequested(const std::string& p_Id);

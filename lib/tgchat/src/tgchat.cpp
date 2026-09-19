@@ -3608,6 +3608,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     }
 
     SetThumbnail(fileInfo, animation->thumbnail_);
+    fileInfo.duration = animation->duration_;
 
     p_FileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
   }
@@ -3765,6 +3766,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     }
 
     SetThumbnail(fileInfo, video->thumbnail_);
+    fileInfo.duration = video->duration_;
 
     p_FileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
   }
@@ -3791,6 +3793,7 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
     }
 
     SetThumbnail(fileInfo, videoNote->thumbnail_);
+    fileInfo.duration = videoNote->duration_;
 
     p_FileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
   }

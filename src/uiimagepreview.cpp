@@ -49,6 +49,7 @@ namespace
     int maxW = 0;
     int maxH = 0;
     bool playIcon = false;
+    std::string label;
   };
 
   std::mutex s_Mutex;
@@ -95,6 +96,15 @@ namespace
         " -fill '#000000a0' -draw 'circle " + pt(c, c) + " " + pt(c, c - r) + "'"
         " -fill white -draw 'polygon " + pt(c - t / 2, c - t / 2 - 2) + " " + pt(c - t / 2, c + t / 2 + 2) + " " +
         pt(c + t / 2 + 2, c) + "' ')' -gravity center -composite";
+    }
+
+    if (!p_Job.label.empty())
+    {
+      // label with translucent background at bottom left, label is only digits and colons
+      const int pointSize = std::max(11, std::min(20, p_Job.maxH / 15));
+      playIconArgs += " -font \"$(fc-match -f '%{file}' sans:bold 2>/dev/null)\" -gravity southwest"
+        " -fill white -undercolor '#00000090' -pointsize " + std::to_string(pointSize) +
+        " -annotate +5+5 ' " + p_Job.label + " '";
     }
 
     StrUtil::ReplaceString(command, "%4", playIconArgs);
@@ -247,15 +257,18 @@ bool UiImagePreview::IsPreviewable(const std::string& p_Path)
   return rv;
 }
 
-static std::string GetKey(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon)
+static std::string GetKey(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon,
+                          const std::string& p_Label)
 {
-  return p_Path + "|" + std::to_string(p_MaxW) + "x" + std::to_string(p_MaxH) + (p_PlayIcon ? "|play" : "");
+  return p_Path + "|" + std::to_string(p_MaxW) + "x" + std::to_string(p_MaxH) + (p_PlayIcon ? "|play" : "") +
+    "|" + p_Label;
 }
 
-bool UiImagePreview::IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon)
+bool UiImagePreview::IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon,
+                              const std::string& p_Label)
 {
   std::unique_lock<std::mutex> lock(s_Mutex);
-  auto it = s_Cache.find(GetKey(p_Path, p_MaxW, p_MaxH, p_PlayIcon));
+  auto it = s_Cache.find(GetKey(p_Path, p_MaxW, p_MaxH, p_PlayIcon, p_Label));
   return (it != s_Cache.end()) && (it->second.state == State::Failed);
 }
 
@@ -265,9 +278,9 @@ bool UiImagePreview::MarkRequested(const std::string& p_Id)
 }
 
 std::shared_ptr<const std::string> UiImagePreview::GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH,
-                                                            bool p_PlayIcon)
+                                                            bool p_PlayIcon, const std::string& p_Label)
 {
-  const std::string key = GetKey(p_Path, p_MaxW, p_MaxH, p_PlayIcon);
+  const std::string key = GetKey(p_Path, p_MaxW, p_MaxH, p_PlayIcon, p_Label);
 
   std::unique_lock<std::mutex> lock(s_Mutex);
   auto it = s_Cache.find(key);
@@ -286,7 +299,7 @@ std::shared_ptr<const std::string> UiImagePreview::GetSixel(const std::string& p
   }
 
   s_Cache[key] = Entry();
-  s_Jobs.push_back(Job{ key, p_Path, p_MaxW, p_MaxH, p_PlayIcon });
+  s_Jobs.push_back(Job{ key, p_Path, p_MaxW, p_MaxH, p_PlayIcon, p_Label });
 
   if (!s_Running)
   {
@@ -296,6 +309,24 @@ std::shared_ptr<const std::string> UiImagePreview::GetSixel(const std::string& p
 
   s_CondVar.notify_one();
   return nullptr;
+}
+
+std::string UiImagePreview::FormatDuration(int p_Seconds)
+{
+  char buf[32];
+  const int h = p_Seconds / 3600;
+  const int m = (p_Seconds % 3600) / 60;
+  const int s = p_Seconds % 60;
+  if (h > 0)
+  {
+    snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, s);
+  }
+  else
+  {
+    snprintf(buf, sizeof(buf), "%d:%02d", m, s);
+  }
+
+  return buf;
 }
 
 bool UiImagePreview::TakeUpdated()

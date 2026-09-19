@@ -2096,10 +2096,12 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
           // keep thumbnail info, which is not known by download notification
           FileInfo oldFileInfo = ProtocolUtil::FileInfoFromHex(mit->second.fileInfo);
           FileInfo newFileInfo = ProtocolUtil::FileInfoFromHex(fileInfoStr);
-          if (!oldFileInfo.thumbId.empty() && newFileInfo.thumbId.empty())
+          if ((!oldFileInfo.thumbId.empty() && newFileInfo.thumbId.empty()) ||
+              ((oldFileInfo.duration >= 0) && (newFileInfo.duration < 0)))
           {
             newFileInfo.thumbId = oldFileInfo.thumbId;
             newFileInfo.thumbPath = oldFileInfo.thumbPath;
+            newFileInfo.duration = oldFileInfo.duration;
             fileInfoStr = ProtocolUtil::FileInfoToHex(newFileInfo);
             MessageCache::UpdateMessageFileInfo(profileId, chatId, msgId, fileInfoStr);
           }

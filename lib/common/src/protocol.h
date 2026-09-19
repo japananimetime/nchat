@@ -170,6 +170,7 @@ struct FileInfo
   std::string fileType;
   std::string thumbId; // optional preview image, e.g. video thumbnail
   std::string thumbPath;
+  int32_t duration = -1; // seconds for video, -1 if unknown / not applicable
 };
 
 // ensure CacheUtil and Serialization are up-to-date after modifying Reactions

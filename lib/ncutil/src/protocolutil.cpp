@@ -162,6 +162,11 @@ FileInfo ProtocolUtil::FileInfoFromHex(const std::string& p_Str)
     fileInfo.thumbPath = StrUtil::StrFromHex(fields.at(2));
   }
 
+  if (fields.size() >= 4)
+  {
+    fileInfo.duration = StrUtil::NumFromHex<int32_t>(fields.at(3));
+  }
+
   return fileInfo;
 }
 
@@ -172,7 +177,8 @@ std::string ProtocolUtil::FileInfoToHex(const FileInfo& p_FileInfo)
     StrUtil::StrToHex(p_FileInfo.fileId) + "," +
     StrUtil::StrToHex(p_FileInfo.filePath) + "," +
     StrUtil::StrToHex(p_FileInfo.fileType) +
-    ((p_FileInfo.thumbId.empty() && p_FileInfo.thumbPath.empty()) ? "" :
-     ("," + StrUtil::StrToHex(p_FileInfo.thumbId) + "," + StrUtil::StrToHex(p_FileInfo.thumbPath))) + "\n";
+    ((p_FileInfo.thumbId.empty() && p_FileInfo.thumbPath.empty() && (p_FileInfo.duration < 0)) ? "" :
+     ("," + StrUtil::StrToHex(p_FileInfo.thumbId) + "," + StrUtil::StrToHex(p_FileInfo.thumbPath) +
+      ((p_FileInfo.duration < 0) ? "" : ("," + StrUtil::NumToHex<int32_t>(p_FileInfo.duration))))) + "\n";
   return hexStr;
 }
