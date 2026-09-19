@@ -29,7 +29,7 @@ option(DOWNLOAD_LIBSIGNAL "Download pre-built libsignal_ffi (falls back to build
 # libsignal_ffi.a in the build tree (runtime crash in signal_encrypt_message).
 # This also means the ref cannot be overridden from the command line with
 # -DLIBSIGNAL_BUILD_REF=...; edit this line directly (or use utils/signal-update).
-set(LIBSIGNAL_BUILD_REF "c5c17f8ce9e89352c143ef0d2feaf306fa6966b3")
+set(LIBSIGNAL_BUILD_REF "ad90458f26b66f6b385e01b32d207147ef1cbdd3")
 
 set(LIBSIGNAL_FFI_DIR ${CMAKE_CURRENT_BINARY_DIR}/libsignal)
 set(LIBSIGNAL_FFI_FILE ${LIBSIGNAL_FFI_DIR}/libsignal_ffi.a)
@@ -77,8 +77,14 @@ if(DOWNLOAD_LIBSIGNAL)
     if(NOT EXISTS ${LIBSIGNAL_FFI_FILE})
       set(LIBSIGNAL_FFI_URL "https://mau.dev/tulir/gomuks-build-docker/-/jobs/artifacts/${LIBSIGNAL_BUILD_REF}/raw/libsignal_ffi.a?job=libsignal%20${LIBSIGNAL_OS}%20${LIBSIGNAL_ARCH}")
       message(STATUS "Downloading libsignal_ffi.a for ${LIBSIGNAL_OS} ${LIBSIGNAL_ARCH}...")
+      # SHOW_PROGRESS prints '-- [download N% complete]' lines (no carriage
+      # returns), which read cleanly both interactively and in log files.
+      # INACTIVITY_TIMEOUT aborts a stalled transfer so a hung server falls
+      # back to building from source instead of blocking the configure step.
       file(DOWNLOAD ${LIBSIGNAL_FFI_URL} ${LIBSIGNAL_FFI_FILE}
         TLS_VERIFY ON
+        SHOW_PROGRESS
+        INACTIVITY_TIMEOUT 120
         STATUS LIBSIGNAL_DOWNLOAD_STATUS)
       list(GET LIBSIGNAL_DOWNLOAD_STATUS 0 LIBSIGNAL_DOWNLOAD_CODE)
       list(GET LIBSIGNAL_DOWNLOAD_STATUS 1 LIBSIGNAL_DOWNLOAD_MSG)
@@ -105,8 +111,8 @@ endif()
 
 if(NOT LIBSIGNAL_USE_DOWNLOAD)
   # Build libsignal_ffi from source
-  # Determine required version from version.go
-  file(STRINGS "${SIGNAL_GO_DIR}/ext/signal/pkg/libsignalgo/version.go" LIBSIGNAL_VERSION_LINE REGEX "const Version")
+  # Determine required version from signalversion/version.go
+  file(STRINGS "${SIGNAL_GO_DIR}/ext/signal/pkg/libsignalgo/signalversion/version.go" LIBSIGNAL_VERSION_LINE REGEX "const Version")
   string(REGEX REPLACE ".*\"(.*)\".*" "\\1" LIBSIGNAL_REQUIRED_VERSION "${LIBSIGNAL_VERSION_LINE}")
 
   # Invalidate cached libsignal_ffi.a if version has changed
