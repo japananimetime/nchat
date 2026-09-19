@@ -16,6 +16,7 @@
 #include "timeutil.h"
 #include "uicolorconfig.h"
 #include "uiconfig.h"
+#include "uiimagepreview.h"
 #include "uimodel.h"
 
 UiHistoryView::UiHistoryView(const UiViewParams& p_Params)
@@ -25,11 +26,11 @@ UiHistoryView::UiHistoryView(const UiViewParams& p_Params)
   {
     int hpad = (m_X == 0) ? 0 : 1;
     int vpad = 1;
-    int paddedY = m_Y + vpad;
-    int paddedX = m_X + hpad;
+    m_PaddedY = m_Y + vpad;
+    m_PaddedX = m_X + hpad;
     m_PaddedH = m_H - (vpad * 2);
     m_PaddedW = m_W - (hpad * 2);
-    m_PaddedWin = newwin(m_PaddedH, m_PaddedW, paddedY, paddedX);
+    m_PaddedWin = newwin(m_PaddedH, m_PaddedW, m_PaddedY, m_PaddedX);
 
     static int attributeTextNormal = UiColorConfig::GetAttribute("history_text_attr");
     static int colorPairTextRecv = UiColorConfig::GetColorPair("history_text_recv_color");
@@ -50,6 +51,11 @@ UiHistoryView::~UiHistoryView()
 
 void UiHistoryView::Draw()
 {
+  if (m_Enabled && UiImagePreview::IsEnabled() && UiImagePreview::TakeUpdated())
+  {
+    m_Dirty = true;
+  }
+
   if (!m_Enabled || !m_Dirty) return;
   m_Dirty = false;
 
@@ -86,6 +92,28 @@ void UiHistoryView::Draw()
   wbkgd(m_PaddedWin, attributeTextNormal | colorPairTextRecv | ' ');
 
   m_HistoryShowCount = 0;
+
+  // image previews are reserved as blank lines, and drawn as sixels after curses refresh
+  struct PreviewPlacement
+  {
+    int y = 0;
+    std::string path;
+  };
+  std::vector<PreviewPlacement> previewPlacements;
+  int previewMaxW = 0;
+  int previewMaxH = 0;
+  bool previewActive = false;
+  if (UiImagePreview::IsEnabled())
+  {
+    int cellW = 0;
+    int cellH = 0;
+    if (UiImagePreview::GetCellSize(cellW, cellH))
+    {
+      previewMaxW = std::min(UiImagePreview::GetMaxCols(), m_PaddedW) * cellW;
+      previewMaxH = ((UiImagePreview::GetRows() * cellH) / 6) * 6; // sixel bands are 6 pixels high
+      previewActive = (previewMaxW > 0) && (previewMaxH > 0) && (UiImagePreview::GetRows() < (m_PaddedH - 2));
+    }
+  }
 
   bool firstMessage = true;
   int y = m_PaddedH - 1;
@@ -172,6 +200,10 @@ void UiHistoryView::Draw()
     }
 
     // File attachment
+    std::string previewPath;
+    bool previewReserved = false;
+    int previewRows = 0;
+    const int previewStart = 1; // directly after attachment line
     if (!msg.fileInfo.empty())
     {
       FileInfo fileInfo = ProtocolUtil::FileInfoFromHex(msg.fileInfo);
@@ -222,6 +254,37 @@ void UiHistoryView::Draw()
 
       std::wstring fileStr = attachmentIndicator + StrUtil::ToWString(fileName + fileStatus);
       wlines.insert(wlines.begin(), fileStr);
+
+      if (previewActive)
+      {
+        if (UiModel::IsAttachmentDownloaded(fileInfo) && UiImagePreview::IsPreviewable(fileInfo.filePath))
+        {
+          previewPath = fileInfo.filePath;
+        }
+        else if ((fileInfo.filePath == "[Photo]") && UiModel::IsAttachmentDownloadable(fileInfo))
+        {
+          // reserve space while downloading photo to keep layout stable
+          m_Model->DownloadAttachmentLocked(currentChat.first, currentChat.second, *it,
+                                            fileInfo.fileId, DownloadFileActionNone);
+          previewReserved = true;
+        }
+        else if ((fileInfo.filePath == "[Photo]") && (fileInfo.fileStatus == FileStatusDownloading))
+        {
+          previewReserved = true;
+        }
+        else if ((fileInfo.filePath == "[Sticker]") && UiModel::IsAttachmentDownloadable(fileInfo))
+        {
+          // stickers may be animated (not previewable), so reserve space only once downloaded
+          m_Model->DownloadAttachmentLocked(currentChat.first, currentChat.second, *it,
+                                            fileInfo.fileId, DownloadFileActionNone);
+        }
+
+        if (!previewPath.empty() || previewReserved)
+        {
+          wlines.insert(wlines.begin() + 1, UiImagePreview::GetRows(), std::wstring());
+          previewRows = UiImagePreview::GetRows();
+        }
+      }
     }
 
     // Reactions
@@ -312,10 +375,20 @@ void UiHistoryView::Draw()
       wlines.resize(maxMessageLines - 1);
       wlines.push_back(L"[...]");
       reactionLines = 0;
+      if ((previewStart + previewRows) > (maxMessageLines - 1))
+      {
+        previewPath.clear();
+      }
     }
 
     for (auto wline = wlines.rbegin(); wline != wlines.rend(); ++wline)
     {
+      if (!previewPath.empty() && (std::distance(wline, wlines.rend()) - 1 == previewStart))
+      {
+        // top line of preview reached, i.e. whole preview is visible
+        previewPlacements.push_back(PreviewPlacement{ y, previewPath });
+      }
+
       bool isAttachment = (wline->rfind(attachmentIndicator, 0) == 0);
       bool isQuote = (wline->rfind(quoteIndicator, 0) == 0);
       bool isReaction = (reactionLines == 1) && (std::distance(wline, wlines.rbegin()) == 0);
@@ -433,7 +506,28 @@ void UiHistoryView::Draw()
     firstMessage = false;
   }
 
+  // repaint all cells to clear any previously drawn sixels
+  static bool hadPreviews = false;
+  if (previewActive && (hadPreviews || !previewPlacements.empty()))
+  {
+    redrawwin(m_PaddedWin);
+  }
+
+  hadPreviews = previewActive && !previewPlacements.empty();
+
   wrefresh(m_PaddedWin);
+
+  if (UiImagePreview::IsSuppressed()) return;
+
+  for (const auto& placement : previewPlacements)
+  {
+    std::shared_ptr<const std::string> sixel =
+      UiImagePreview::GetSixel(placement.path, previewMaxW, previewMaxH);
+    if (sixel)
+    {
+      UiImagePreview::Output(*sixel, m_PaddedY + placement.y, m_PaddedX);
+    }
+  }
 }
 
 int UiHistoryView::GetHistoryShowCount()

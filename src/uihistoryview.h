@@ -25,6 +25,8 @@ private:
 
 private:
   WINDOW* m_PaddedWin = nullptr;
+  int m_PaddedY = 0;
+  int m_PaddedX = 0;
   int m_PaddedH = 0;
   int m_PaddedW = 0;
   int m_HistoryShowCount = 0;

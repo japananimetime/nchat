@@ -9,6 +9,7 @@
 
 #include "strutil.h"
 #include "uicolorconfig.h"
+#include "uiimagepreview.h"
 #include "uimodel.h"
 #include "uiview.h"
 
@@ -18,6 +19,7 @@ UiDialog::UiDialog(const UiDialogParams& p_Params)
   , m_WReq(p_Params.wReq)
   , m_HReq(p_Params.hReq)
 {
+  UiImagePreview::Suppress(true);
   Init();
   curs_set(0);
 }
@@ -26,10 +28,17 @@ UiDialog::~UiDialog()
 {
   Cleanup();
   curs_set(1);
+  UiImagePreview::Suppress(false);
 }
 
 void UiDialog::Init()
 {
+  if (UiImagePreview::IsEnabled())
+  {
+    // sixels are not known by curses, clear whole screen on next refresh to remove them
+    clearok(curscr, TRUE);
+  }
+
   int screenW = m_Model->GetScreenWidth();
   int screenH = m_Model->GetScreenHeight();
   int w = (m_WReq > 1.0f) ? m_WReq : (screenW * m_WReq);

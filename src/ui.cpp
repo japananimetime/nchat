@@ -19,6 +19,7 @@
 #include "uicolorconfig.h"
 #include "uiconfig.h"
 #include "uicontroller.h"
+#include "uiimagepreview.h"
 #include "uikeyconfig.h"
 #include "uikeydump.h"
 #include "uimodel.h"
@@ -68,6 +69,7 @@ void Ui::Cleanup()
 {
   m_Controller->Cleanup();
   m_Model->Cleanup();
+  UiImagePreview::Cleanup();
   UiColorConfig::Cleanup();
   UiKeyConfig::Cleanup();
   EmojiList::Cleanup();
