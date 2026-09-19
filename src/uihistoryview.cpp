@@ -100,6 +100,7 @@ void UiHistoryView::Draw()
   {
     int y = 0;
     std::string path;
+    bool playIcon = false;
   };
   std::vector<PreviewPlacement> previewPlacements;
   int previewMaxW = 0;
@@ -203,6 +204,7 @@ void UiHistoryView::Draw()
 
     // File attachment
     std::string previewPath;
+    bool previewPlayIcon = false;
     bool previewReserved = false;
     int previewRows = 0;
     const int previewStart = 1; // directly after attachment line
@@ -281,16 +283,16 @@ void UiHistoryView::Draw()
                                             fileInfo.fileId, DownloadFileActionNone);
         }
 
+        static const std::set<std::string> videoPlaceholders = { "[Video]", "[VideoNote]", "[Animation]" };
+        static const std::set<std::string> videoExts = { ".mp4", ".mov", ".webm", ".mkv", ".m4v", ".gif" };
+        const bool isVideo = (videoPlaceholders.count(fileInfo.filePath) > 0) ||
+          (videoExts.count(StrUtil::ToLower(FileUtil::GetFileExt(fileInfo.filePath))) > 0);
+
         // messages cached before thumbnail support need to be refreshed to get thumbnail info
-        if (previewPath.empty() && !previewReserved && fileInfo.thumbId.empty() && fileInfo.thumbPath.empty())
+        if (previewPath.empty() && !previewReserved && fileInfo.thumbId.empty() && fileInfo.thumbPath.empty() &&
+            isVideo)
         {
-          static const std::set<std::string> videoPlaceholders = { "[Video]", "[VideoNote]", "[Animation]" };
-          static const std::set<std::string> videoExts = { ".mp4", ".mov", ".webm", ".mkv", ".m4v", ".gif" };
-          if ((videoPlaceholders.count(fileInfo.filePath) > 0) ||
-              (videoExts.count(StrUtil::ToLower(FileUtil::GetFileExt(fileInfo.filePath))) > 0))
-          {
-            m_Model->RefreshMessageLocked(currentChat.first, currentChat.second, *it);
-          }
+          m_Model->RefreshMessageLocked(currentChat.first, currentChat.second, *it);
         }
 
         // fall back to thumbnail, e.g. first frame of video
@@ -299,6 +301,7 @@ void UiHistoryView::Draw()
           if (!fileInfo.thumbPath.empty() && UiImagePreview::IsPreviewable(fileInfo.thumbPath))
           {
             previewPath = fileInfo.thumbPath;
+            previewPlayIcon = isVideo;
           }
           else if (fileInfo.thumbPath.empty())
           {
@@ -313,7 +316,7 @@ void UiHistoryView::Draw()
         }
 
         // skip images which could not be converted
-        if (!previewPath.empty() && UiImagePreview::IsFailed(previewPath, previewMaxW, previewMaxH))
+        if (!previewPath.empty() && UiImagePreview::IsFailed(previewPath, previewMaxW, previewMaxH, previewPlayIcon))
         {
           previewPath.clear();
         }
@@ -425,7 +428,7 @@ void UiHistoryView::Draw()
       if (!previewPath.empty() && (std::distance(wline, wlines.rend()) - 1 == previewStart))
       {
         // top line of preview reached, i.e. whole preview is visible
-        previewPlacements.push_back(PreviewPlacement{ y, previewPath });
+        previewPlacements.push_back(PreviewPlacement{ y, previewPath, previewPlayIcon });
       }
 
       bool isAttachment = (wline->rfind(attachmentIndicator, 0) == 0);
@@ -561,7 +564,7 @@ void UiHistoryView::Draw()
   for (const auto& placement : previewPlacements)
   {
     std::shared_ptr<const std::string> sixel =
-      UiImagePreview::GetSixel(placement.path, previewMaxW, previewMaxH);
+      UiImagePreview::GetSixel(placement.path, previewMaxW, previewMaxH, placement.playIcon);
     if (sixel)
     {
       UiImagePreview::Output(*sixel, m_PaddedY + placement.y, m_PaddedX);

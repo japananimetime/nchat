@@ -48,6 +48,7 @@ namespace
     std::string path;
     int maxW = 0;
     int maxH = 0;
+    bool playIcon = false;
   };
 
   std::mutex s_Mutex;
@@ -70,7 +71,7 @@ namespace
       std::string command = UiConfig::GetStr("attachment_preview_command");
       if (command.empty())
       {
-        command = "magick '%1[0]' -auto-orient -resize %2x%3 -colors 255 sixel:- 2>/dev/null";
+        command = "magick '%1[0]' -auto-orient -resize %2x%3 %4 -colors 255 sixel:- 2>/dev/null";
       }
 
       return command;
@@ -80,6 +81,23 @@ namespace
     StrUtil::ReplaceString(command, "%1", StrUtil::EscapeSingleQuote(p_Job.path));
     StrUtil::ReplaceString(command, "%2", std::to_string(p_Job.maxW));
     StrUtil::ReplaceString(command, "%3", std::to_string(p_Job.maxH));
+
+    std::string playIconArgs;
+    if (p_Job.playIcon)
+    {
+      // translucent circle with triangle composited at center
+      const int size = std::max(28, std::min(64, std::min(p_Job.maxW, p_Job.maxH) / 4));
+      const int c = size / 2;
+      const int r = c - 1;
+      const int t = size * 3 / 8;
+      auto pt = [](int x, int y) { return std::to_string(x) + "," + std::to_string(y); };
+      playIconArgs = "'(' -size " + std::to_string(size) + "x" + std::to_string(size) + " xc:none"
+        " -fill '#000000a0' -draw 'circle " + pt(c, c) + " " + pt(c, c - r) + "'"
+        " -fill white -draw 'polygon " + pt(c - t / 2, c - t / 2 - 2) + " " + pt(c - t / 2, c + t / 2 + 2) + " " +
+        pt(c + t / 2 + 2, c) + "' ')' -gravity center -composite";
+    }
+
+    StrUtil::ReplaceString(command, "%4", playIconArgs);
 
     std::string output;
     FILE* pipe = popen(command.c_str(), "r");
@@ -229,15 +247,15 @@ bool UiImagePreview::IsPreviewable(const std::string& p_Path)
   return rv;
 }
 
-static std::string GetKey(const std::string& p_Path, int p_MaxW, int p_MaxH)
+static std::string GetKey(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon)
 {
-  return p_Path + "|" + std::to_string(p_MaxW) + "x" + std::to_string(p_MaxH);
+  return p_Path + "|" + std::to_string(p_MaxW) + "x" + std::to_string(p_MaxH) + (p_PlayIcon ? "|play" : "");
 }
 
-bool UiImagePreview::IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH)
+bool UiImagePreview::IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon)
 {
   std::unique_lock<std::mutex> lock(s_Mutex);
-  auto it = s_Cache.find(GetKey(p_Path, p_MaxW, p_MaxH));
+  auto it = s_Cache.find(GetKey(p_Path, p_MaxW, p_MaxH, p_PlayIcon));
   return (it != s_Cache.end()) && (it->second.state == State::Failed);
 }
 
@@ -246,9 +264,10 @@ bool UiImagePreview::MarkRequested(const std::string& p_Id)
   return s_Requested.insert(p_Id).second;
 }
 
-std::shared_ptr<const std::string> UiImagePreview::GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH)
+std::shared_ptr<const std::string> UiImagePreview::GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH,
+                                                            bool p_PlayIcon)
 {
-  const std::string key = GetKey(p_Path, p_MaxW, p_MaxH);
+  const std::string key = GetKey(p_Path, p_MaxW, p_MaxH, p_PlayIcon);
 
   std::unique_lock<std::mutex> lock(s_Mutex);
   auto it = s_Cache.find(key);
@@ -267,7 +286,7 @@ std::shared_ptr<const std::string> UiImagePreview::GetSixel(const std::string& p
   }
 
   s_Cache[key] = Entry();
-  s_Jobs.push_back(Job{ key, p_Path, p_MaxW, p_MaxH });
+  s_Jobs.push_back(Job{ key, p_Path, p_MaxW, p_MaxH, p_PlayIcon });
 
   if (!s_Running)
   {

@@ -27,11 +27,13 @@ public:
   // true if file is a (still) image that can be previewed
   static bool IsPreviewable(const std::string& p_Path);
 
-  // returns sixel data, or nullptr if not yet encoded (encoding is queued) or failed
-  static std::shared_ptr<const std::string> GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH);
+  // returns sixel data, or nullptr if not yet encoded (encoding is queued) or failed,
+  // play icon is overlaid for video thumbnails
+  static std::shared_ptr<const std::string> GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH,
+                                                     bool p_PlayIcon);
 
   // true if encoding was attempted and failed
-  static bool IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH);
+  static bool IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH, bool p_PlayIcon);
 
   // true the first time called for given id, used to request thumbnail downloads once
   static bool MarkRequested(const std::string& p_Id);
