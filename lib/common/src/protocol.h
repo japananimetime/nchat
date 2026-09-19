@@ -168,6 +168,8 @@ struct FileInfo
   std::string fileId;
   std::string filePath;
   std::string fileType;
+  std::string thumbId; // optional preview image, e.g. video thumbnail
+  std::string thumbPath;
 };
 
 // ensure CacheUtil and Serialization are up-to-date after modifying Reactions
@@ -222,6 +224,7 @@ enum DownloadFileAction
   DownloadFileActionOpen = 1,
   DownloadFileActionSave = 2,
   DownloadFileActionCopy = 3,
+  DownloadFileActionThumb = 4, // fileId is FileInfo::thumbId, result is not cached
 };
 
 // Request messages

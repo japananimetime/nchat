@@ -7,6 +7,8 @@
 
 #include "uihistoryview.h"
 
+#include <set>
+
 #include "appconfig.h"
 #include "apputil.h"
 #include "fileutil.h"
@@ -277,6 +279,43 @@ void UiHistoryView::Draw()
           // stickers may be animated (not previewable), so reserve space only once downloaded
           m_Model->DownloadAttachmentLocked(currentChat.first, currentChat.second, *it,
                                             fileInfo.fileId, DownloadFileActionNone);
+        }
+
+        // messages cached before thumbnail support need to be refreshed to get thumbnail info
+        if (previewPath.empty() && !previewReserved && fileInfo.thumbId.empty() && fileInfo.thumbPath.empty())
+        {
+          static const std::set<std::string> videoPlaceholders = { "[Video]", "[VideoNote]", "[Animation]" };
+          static const std::set<std::string> videoExts = { ".mp4", ".mov", ".webm", ".mkv", ".m4v", ".gif" };
+          if ((videoPlaceholders.count(fileInfo.filePath) > 0) ||
+              (videoExts.count(StrUtil::ToLower(FileUtil::GetFileExt(fileInfo.filePath))) > 0))
+          {
+            m_Model->RefreshMessageLocked(currentChat.first, currentChat.second, *it);
+          }
+        }
+
+        // fall back to thumbnail, e.g. first frame of video
+        if (previewPath.empty() && !previewReserved && !fileInfo.thumbId.empty())
+        {
+          if (!fileInfo.thumbPath.empty() && UiImagePreview::IsPreviewable(fileInfo.thumbPath))
+          {
+            previewPath = fileInfo.thumbPath;
+          }
+          else if (fileInfo.thumbPath.empty())
+          {
+            if (UiImagePreview::MarkRequested(fileInfo.thumbId))
+            {
+              m_Model->DownloadAttachmentLocked(currentChat.first, currentChat.second, *it,
+                                                fileInfo.thumbId, DownloadFileActionThumb);
+            }
+
+            previewReserved = true;
+          }
+        }
+
+        // skip images which could not be converted
+        if (!previewPath.empty() && UiImagePreview::IsFailed(previewPath, previewMaxW, previewMaxH))
+        {
+          previewPath.clear();
         }
 
         if (!previewPath.empty() || previewReserved)

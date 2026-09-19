@@ -50,6 +50,8 @@ void Ui::Init()
 
   printf("\033[?1004h"); // enable terminal focus in/out event
 
+  UiImagePreview::Init();
+
   setlocale(LC_ALL, "");
   initscr();
   noecho();

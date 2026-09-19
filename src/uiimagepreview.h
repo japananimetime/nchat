@@ -15,6 +15,8 @@
 class UiImagePreview
 {
 public:
+  // detect terminal support, must be called before curses init
+  static void Init();
   static bool IsEnabled();
   static int GetRows();
   static int GetMaxCols();
@@ -27,6 +29,12 @@ public:
 
   // returns sixel data, or nullptr if not yet encoded (encoding is queued) or failed
   static std::shared_ptr<const std::string> GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH);
+
+  // true if encoding was attempted and failed
+  static bool IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH);
+
+  // true the first time called for given id, used to request thumbnail downloads once
+  static bool MarkRequested(const std::string& p_Id);
 
   // true once after a queued encoding completed, i.e. a redraw is needed
   static bool TakeUpdated();

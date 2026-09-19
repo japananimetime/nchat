@@ -962,6 +962,8 @@ void UiModel::Impl::DownloadAttachment(const std::string& p_ProfileId, const std
     return;
   }
 
+  if (p_DownloadFileAction == DownloadFileActionThumb) return;
+
   FileInfo fileInfo = ProtocolUtil::FileInfoFromHex(mit->second.fileInfo);
   fileInfo.fileStatus = FileStatusDownloading;
   mit->second.fileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
@@ -1720,6 +1722,21 @@ void UiModel::Impl::FetchCachedMessage(const std::string& p_ProfileId, const std
   }
 }
 
+void UiModel::Impl::RefreshMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
+                                   const std::string& p_MsgId)
+{
+  // fetch message from protocol bypassing cache, at most once per session
+  static std::set<std::string> refreshed;
+  if (!refreshed.insert(p_ProfileId + "|" + p_ChatId + "|" + p_MsgId).second) return;
+
+  std::shared_ptr<GetMessageRequest> getMessageRequest = std::make_shared<GetMessageRequest>();
+  getMessageRequest->chatId = p_ChatId;
+  getMessageRequest->msgId = p_MsgId;
+  getMessageRequest->cached = false;
+  LOG_TRACE("refresh message %s in %s", p_MsgId.c_str(), p_ChatId.c_str());
+  SendProtocolRequest(p_ProfileId, getMessageRequest);
+}
+
 void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage)
 {
   const std::string profileId = p_ServiceMessage->profileId;
@@ -2060,8 +2077,33 @@ void UiModel::Impl::MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMess
         LOG_TRACE("new file info for %s is %s", msgId.c_str(), fileInfoStr.c_str());
         std::unordered_map<std::string, ChatMessage>& messages = m_Messages[profileId][chatId];
         auto mit = messages.find(msgId);
+        if (downloadFileAction == DownloadFileActionThumb)
+        {
+          // thumbnail downloaded, only update its path
+          if (mit != messages.end())
+          {
+            FileInfo fileInfo = ProtocolUtil::FileInfoFromHex(mit->second.fileInfo);
+            fileInfo.thumbPath = ProtocolUtil::FileInfoFromHex(fileInfoStr).filePath;
+            mit->second.fileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
+          }
+
+          UpdateHistory();
+          break;
+        }
+
         if (mit != messages.end())
         {
+          // keep thumbnail info, which is not known by download notification
+          FileInfo oldFileInfo = ProtocolUtil::FileInfoFromHex(mit->second.fileInfo);
+          FileInfo newFileInfo = ProtocolUtil::FileInfoFromHex(fileInfoStr);
+          if (!oldFileInfo.thumbId.empty() && newFileInfo.thumbId.empty())
+          {
+            newFileInfo.thumbId = oldFileInfo.thumbId;
+            newFileInfo.thumbPath = oldFileInfo.thumbPath;
+            fileInfoStr = ProtocolUtil::FileInfoToHex(newFileInfo);
+            MessageCache::UpdateMessageFileInfo(profileId, chatId, msgId, fileInfoStr);
+          }
+
           mit->second.fileInfo = fileInfoStr;
         }
 
@@ -5299,6 +5341,13 @@ void UiModel::FetchCachedMessageLocked(const std::string& p_ProfileId, const std
 {
   nc_assert(m_ModelMutex.owns_lock());
   GetImpl().FetchCachedMessage(p_ProfileId, p_ChatId, p_MsgId);
+}
+
+void UiModel::RefreshMessageLocked(const std::string& p_ProfileId, const std::string& p_ChatId,
+                                   const std::string& p_MsgId)
+{
+  nc_assert(m_ModelMutex.owns_lock());
+  GetImpl().RefreshMessage(p_ProfileId, p_ChatId, p_MsgId);
 }
 
 bool UiModel::IsMultipleProfilesLocked()

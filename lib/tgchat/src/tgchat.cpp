@@ -3552,6 +3552,25 @@ std::string TgChat::Impl::GetText(td::td_api::object_ptr<td::td_api::formattedTe
   return text;
 }
 
+static void SetThumbnail(FileInfo& p_FileInfo, const td::td_api::object_ptr<td::td_api::thumbnail>& p_Thumbnail)
+{
+  if (!p_Thumbnail || !p_Thumbnail->file_ || !p_Thumbnail->format_) return;
+
+  // only still image formats can be previewed
+  const int32_t formatId = p_Thumbnail->format_->get_id();
+  if ((formatId != td::td_api::thumbnailFormatJpeg::ID) && (formatId != td::td_api::thumbnailFormatPng::ID) &&
+      (formatId != td::td_api::thumbnailFormatWebp::ID) && (formatId != td::td_api::thumbnailFormatGif::ID))
+  {
+    return;
+  }
+
+  p_FileInfo.thumbId = p_Thumbnail->file_->remote_->id_;
+  if (p_Thumbnail->file_->local_->is_downloading_completed_)
+  {
+    p_FileInfo.thumbPath = p_Thumbnail->file_->local_->path_;
+  }
+}
+
 void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessageContent, int64_t p_SenderId,
                                            std::string& p_Text, std::string& p_FileInfo)
 {
@@ -3587,6 +3606,8 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
       fileInfo.filePath = "[Animation]";
       fileInfo.fileStatus = FileStatusNotDownloaded;
     }
+
+    SetThumbnail(fileInfo, animation->thumbnail_);
 
     p_FileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
   }
@@ -3657,6 +3678,8 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
       fileInfo.filePath = fileName;
       fileInfo.fileStatus = FileStatusNotDownloaded;
     }
+
+    SetThumbnail(fileInfo, messageDocument.document_->thumbnail_);
 
     p_FileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
   }
@@ -3741,6 +3764,8 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
       fileInfo.fileStatus = FileStatusNotDownloaded;
     }
 
+    SetThumbnail(fileInfo, video->thumbnail_);
+
     p_FileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
   }
   else if (p_TdMessageContent.get_id() == td::td_api::messageVideoNote::ID)
@@ -3764,6 +3789,8 @@ void TgChat::Impl::TdMessageContentConvert(td::td_api::MessageContent& p_TdMessa
       fileInfo.filePath = "[VideoNote]";
       fileInfo.fileStatus = FileStatusNotDownloaded;
     }
+
+    SetThumbnail(fileInfo, videoNote->thumbnail_);
 
     p_FileInfo = ProtocolUtil::FileInfoToHex(fileInfo);
   }

@@ -21,7 +21,7 @@ void UiConfig::Init()
     { "attachment_indicator", "\xF0\x9F\x93\x8E" },
     { "attachment_open_command", "" },
     { "attachment_preview_command", "" },
-    { "attachment_preview_enabled", "0" },
+    { "attachment_preview_enabled", "1" },
     { "attachment_preview_max_cols", "40" },
     { "attachment_preview_rows", "10" },
     { "auto_compose_command", "" },

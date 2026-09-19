@@ -153,7 +153,14 @@ FileInfo ProtocolUtil::FileInfoFromHex(const std::string& p_Str)
     return FileInfo();
   }
 
-  fileInfo.fileType = StrUtil::StrFromHex(tmp);
+  // remaining fields are optional, not present in older cache entries
+  std::vector<std::string> fields = StrUtil::Split(tmp, ',');
+  fileInfo.fileType = fields.empty() ? "" : StrUtil::StrFromHex(fields.at(0));
+  if (fields.size() >= 3)
+  {
+    fileInfo.thumbId = StrUtil::StrFromHex(fields.at(1));
+    fileInfo.thumbPath = StrUtil::StrFromHex(fields.at(2));
+  }
 
   return fileInfo;
 }
@@ -164,6 +171,8 @@ std::string ProtocolUtil::FileInfoToHex(const FileInfo& p_FileInfo)
     StrUtil::NumToHex<int>(p_FileInfo.fileStatus) + "," +
     StrUtil::StrToHex(p_FileInfo.fileId) + "," +
     StrUtil::StrToHex(p_FileInfo.filePath) + "," +
-    StrUtil::StrToHex(p_FileInfo.fileType) + "\n";
+    StrUtil::StrToHex(p_FileInfo.fileType) +
+    ((p_FileInfo.thumbId.empty() && p_FileInfo.thumbPath.empty()) ? "" :
+     ("," + StrUtil::StrToHex(p_FileInfo.thumbId) + "," + StrUtil::StrToHex(p_FileInfo.thumbPath))) + "\n";
   return hexStr;
 }

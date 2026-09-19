@@ -178,6 +178,8 @@ void MessageCache::AddFromServiceMessage(const std::string& p_ProfileId,
       {
         std::shared_ptr<NewMessageFileNotify> newMessageFileNotify =
           std::static_pointer_cast<NewMessageFileNotify>(p_ServiceMessage);
+        if (newMessageFileNotify->downloadFileAction == DownloadFileActionThumb) break;
+
         MessageCache::UpdateMessageFileInfo(p_ProfileId, newMessageFileNotify->chatId,
                                             newMessageFileNotify->msgId, newMessageFileNotify->fileInfo);
       }

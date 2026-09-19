@@ -14,9 +14,12 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <thread>
 
+#include <poll.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include "fileutil.h"
@@ -50,11 +53,13 @@ namespace
   std::mutex s_Mutex;
   std::condition_variable s_CondVar;
   std::map<std::string, Entry> s_Cache;
+  std::set<std::string> s_Requested;
   std::deque<Job> s_Jobs;
   std::thread s_Thread;
   bool s_Running = false;
   std::atomic<bool> s_Updated(false);
   int s_SuppressCount = 0;
+  bool s_Enabled = false;
 
   const size_t s_MaxCacheEntries = 200;
 
@@ -128,10 +133,57 @@ namespace
   }
 }
 
+static bool DetectSixelSupport()
+{
+  if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) return false;
+
+  struct termios oldTio;
+  if (tcgetattr(STDIN_FILENO, &oldTio) != 0) return false;
+
+  struct termios newTio = oldTio;
+  newTio.c_lflag &= ~(ICANON | ECHO);
+  newTio.c_cc[VMIN] = 0;
+  newTio.c_cc[VTIME] = 0;
+  tcsetattr(STDIN_FILENO, TCSANOW, &newTio);
+
+  // primary device attributes, response is ESC [ ? Ps ; ... c where Ps 4 means sixel
+  const std::string query = "\033[c";
+  fflush(stdout);
+  bool rv = (write(STDOUT_FILENO, query.data(), query.size()) == (ssize_t)query.size());
+
+  std::string response;
+  const int timeoutMs = 500;
+  while (rv)
+  {
+    struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+    if (poll(&pfd, 1, timeoutMs) <= 0) break;
+
+    char c = 0;
+    if (read(STDIN_FILENO, &c, 1) != 1) break;
+
+    response += c;
+    if ((c == 'c') && (response.find("\033[?") != std::string::npos)) break;
+  }
+
+  tcsetattr(STDIN_FILENO, TCSANOW, &oldTio);
+
+  const std::string attrs = StrUtil::ExtractString(response, "\033[?", "c");
+  const std::vector<std::string> params = StrUtil::Split(attrs, ';');
+  const bool hasSixel = (std::find(params.begin(), params.end(), "4") != params.end());
+  LOG_DEBUG("terminal sixel support %d", hasSixel);
+  return hasSixel;
+}
+
+void UiImagePreview::Init()
+{
+  // 0 = disabled, 1 = enabled if terminal supports sixel, 2 = always enabled
+  const int mode = UiConfig::GetNum("attachment_preview_enabled");
+  s_Enabled = (mode == 2) || ((mode == 1) && DetectSixelSupport());
+}
+
 bool UiImagePreview::IsEnabled()
 {
-  static const bool enabled = UiConfig::GetBool("attachment_preview_enabled");
-  return enabled;
+  return s_Enabled;
 }
 
 int UiImagePreview::GetRows()
@@ -177,9 +229,26 @@ bool UiImagePreview::IsPreviewable(const std::string& p_Path)
   return rv;
 }
 
+static std::string GetKey(const std::string& p_Path, int p_MaxW, int p_MaxH)
+{
+  return p_Path + "|" + std::to_string(p_MaxW) + "x" + std::to_string(p_MaxH);
+}
+
+bool UiImagePreview::IsFailed(const std::string& p_Path, int p_MaxW, int p_MaxH)
+{
+  std::unique_lock<std::mutex> lock(s_Mutex);
+  auto it = s_Cache.find(GetKey(p_Path, p_MaxW, p_MaxH));
+  return (it != s_Cache.end()) && (it->second.state == State::Failed);
+}
+
+bool UiImagePreview::MarkRequested(const std::string& p_Id)
+{
+  return s_Requested.insert(p_Id).second;
+}
+
 std::shared_ptr<const std::string> UiImagePreview::GetSixel(const std::string& p_Path, int p_MaxW, int p_MaxH)
 {
-  const std::string key = p_Path + "|" + std::to_string(p_MaxW) + "x" + std::to_string(p_MaxH);
+  const std::string key = GetKey(p_Path, p_MaxW, p_MaxH);
 
   std::unique_lock<std::mutex> lock(s_Mutex);
   auto it = s_Cache.find(key);

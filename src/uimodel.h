@@ -88,6 +88,8 @@ private:
     void OpenCreateChat(const std::pair<std::string, std::string>& p_Chat);
     void FetchCachedMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
                             const std::string& p_MsgId);
+    void RefreshMessage(const std::string& p_ProfileId, const std::string& p_ChatId,
+                        const std::string& p_MsgId);
 
     void MessageHandler(std::shared_ptr<ServiceMessage> p_ServiceMessage);
     void AddProtocol(std::shared_ptr<Protocol> p_Protocol);
@@ -386,6 +388,8 @@ public:
                                 const std::string& p_FileId, DownloadFileAction p_DownloadFileAction);
   void FetchCachedMessageLocked(const std::string& p_ProfileId, const std::string& p_ChatId,
                                 const std::string& p_MsgId);
+  void RefreshMessageLocked(const std::string& p_ProfileId, const std::string& p_ChatId,
+                            const std::string& p_MsgId);
   bool IsMultipleProfilesLocked();
   void MarkReadLocked(const std::string& p_ProfileId, const std::string& p_ChatId, const std::string& p_MsgId,
                       bool p_WasUnread);
