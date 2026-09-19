@@ -100,9 +100,9 @@ namespace
 
     if (!p_Job.label.empty())
     {
-      // label with translucent background at bottom left, label is only digits and colons
+      // label with translucent background at top left, label is only digits and colons
       const int pointSize = std::max(11, std::min(20, p_Job.maxH / 15));
-      playIconArgs += " -font \"$(fc-match -f '%{file}' sans:bold 2>/dev/null)\" -gravity southwest"
+      playIconArgs += " -font \"$(fc-match -f '%{file}' sans:bold 2>/dev/null)\" -gravity northwest"
         " -fill white -undercolor '#00000090' -pointsize " + std::to_string(pointSize) +
         " -annotate +5+5 ' " + p_Job.label + " '";
     }
